@@ -4,4 +4,3 @@ __pycache__/
 .env
 output/
 .vscode/
-AGENTS.md
