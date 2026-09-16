@@ -19,6 +19,7 @@ Guidance for AI coding agents working in this repository.
 | `storage.py` | Saves results to `output/{prefix}_YYYYMMDD_HHMMSS.{json|md|txt}` per the `storage` config group, optionally with metadata (prompt/model/timestamp/reasoning). |
 | `logger.py` | `setup_logging()`: configures root logger from the `logging` config group (level + `output/app.log`, also echoed to console). |
 | `config.json` | Runtime configuration, now actually loaded by the code. Points to ModelScope (`https://api-inference.modelscope.cn/v1`, `deepseek-ai/DeepSeek-V4.1-Flash`); `api_key` stays empty — the real key is injected from `.env`. See `doc/config字段说明.md` for the field reference. |
+| `README.md` | Project introduction, architecture, features, config reference, and quick-start guide (Chinese). |
 | `doc/config字段说明.md` | Chinese field-by-field documentation of `config.json` and the module layout (api_client / storage / logger). |
 | `requirements.txt` | Pinned dependencies. **Note: this file is UTF-16 encoded**, so plain UTF-8 readers may show garbled text. Key direct dependencies: `openai==3.14.0`, `requests`, `python-dotenv`, `PyYAML`, `tenacity`, `pydantic`. |
 | `.env` | Holds `MODELSCOPE_API_KEY` (the real ModelScope token); gitignored. |
