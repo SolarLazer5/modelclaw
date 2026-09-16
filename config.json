@@ -1,0 +1,26 @@
+{
+    "api": {
+        "base_url": "https://api-inference.modelscope.cn/v1",
+        "api_key": "",
+        "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "temperature": 0.7,
+        "max_tokens": 2048,
+        "timeout": 30
+    },
+    "retry": {
+        "max_attempts": 5,
+        "initial_wait": 1,
+        "backoff_multiplier": 2,
+        "max_wait": 30
+    },
+    "storage": {
+        "output_dir": "output",
+        "default_format": "json",
+        "filename_prefix": "result",
+        "save_metadata": true
+    },
+    "logging": {
+        "level": "INFO",
+        "log_file": "output/app.log"
+    }
+}
