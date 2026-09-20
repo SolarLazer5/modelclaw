@@ -46,10 +46,10 @@ console = Console()
 err_console = Console(stderr=True)
 
 app = typer.Typer(
-    help="modelclaw — 配置化的大模型 CLI 客户端",
-    add_completion=False,
-    no_args_is_help=True,
-    pretty_exceptions_show_locals=False,
+    help="modelclaw — 配置化的大模型 CLI 客户端", #执行modelclaw --help时的标题说明
+    add_completion=False,#关闭modelclaw --help时输出的"自动补全安装提示"
+    no_args_is_help=True,#不带任何参数时，输出modelclaw --help的执行效果
+    pretty_exceptions_show_locals=False,#异常报错时，不打印局部变量表
 )
 
 
@@ -83,14 +83,16 @@ def find_result_file(cfg: dict, name: str) -> Path:
     for candidate in candidates:
         if candidate.is_file():
             return candidate
+    #上面代码是第一阶段，通过直接遍历candidates中的Path对象，如果它是一个文件，则认为是找到匹配项了
+
     # fuzzy match: timestamp fragment, e.g. `show 171114`
     matches = sorted(output_dir.glob(f"*{name}*")) if output_dir.is_dir() else []
-    if len(matches) == 1:
+    if len(matches) == 1:#如果有且只有一个，代表找到唯一个匹配项
         return matches[0]
     raise FileNotFoundError(
         f"找不到结果文件: {name}"
         + (f"（有 {len(matches)} 个模糊匹配，请写完整文件名）" if matches else "")
-    )
+    )#利用三元表达式，如果matches数目为空，则什么都不做，如果不为空，则输出模糊匹配信息
 
 
 def _version_callback(value: bool) -> None:
@@ -380,19 +382,34 @@ def clean(
 
 def main() -> None:
     load_dotenv()
-    # Windows GBK console can't encode emoji etc. — replace instead of crashing mid-stream
+
+    # 遍历两个流
     for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(errors="replace")
+        if hasattr(stream, "reconfigure"):#如果这个流里面有reconfigure方法
+            stream.reconfigure(errors="replace")#调用这个方法，将错误处理策略改为replace
+     #总结:
+     # 如果你有原地调参的本事，就把错误策略调成 replace；
+     # 如果没有（比如 Jupyter、StringIO），那说明你本来也不会在编码上炸，跳过即可。
+
     try:
-        app(prog_name="modelclaw")
+        app(prog_name="modelclaw") #typer 应用程序入口
     except BrokenPipeError:
-        # stdout closed early by the consumer (e.g. `modelclaw models | head`), exit quietly
         os._exit(0)
     except OSError as exc:
-        if exc.errno in (22, 32):  # same situation on Windows legacy console renderer
+        if exc.errno in (22, 32):  
             os._exit(0)
         raise
+    # 关于这段代码的解释：
+    # 主要为了处理modelclaw models | head这种写法，即
+    # modelclaw models  ──写──►  [ 内核管道缓冲区 ]  ──读──►  head
+    # 当读head行完成后，会变成：
+    # modelclaw models ──写──►  [ 内核管道缓冲区 ]   ──✕──►  （读端已关闭，没人读了）
+    # 写端往一个没有任何读者的管道写数据时，操作系统直接拒绝，会抛出BrokenPipeError异常
+    # 捕获这个异常，调用os._exit(0)正常退出即可
+    # except OSError as exc:是为了兼容老旧Windows控制台的异常抛出
+    # 为什么不使用sys.exit(0)？因为sys.exit(0)会冲刷stdout，但这个场景下stdout会断掉，同样会再次抛出异常
+
+
 
 
 if __name__ == "__main__":
