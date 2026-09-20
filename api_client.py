@@ -32,7 +32,7 @@ def create_client(cfg: dict) -> OpenAI:
     )
 
 
-def ask(client: OpenAI, cfg: dict, prompt: str) -> dict:
+def ask(client: OpenAI, cfg: dict, messages: list) -> dict:
     """Send a streaming chat request with exponential-backoff retry.
 
     Prints reasoning and answer chunks as they arrive, and returns the
@@ -55,7 +55,7 @@ def ask(client: OpenAI, cfg: dict, prompt: str) -> dict:
     def _ask_once() -> dict:
         response = client.chat.completions.create(
             model=api_cfg["model"],
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             temperature=api_cfg.get("temperature", 0.7),
             max_tokens=api_cfg.get("max_tokens", 2048),
             stream=True,

@@ -10,6 +10,42 @@
 - **运行日志**：按配置级别同时输出到控制台和 `output/app.log`，API 请求、重试过程、文件保存路径全程可查
 - **配置化**：API 连接、重试策略、存储、日志四组参数集中在 `config.json`，换服务商/换模型/调重试参数只需改配置文件
 - **密钥隔离**：真实 API Token 放在 `.env`（已 gitignore），代码与配置文件中不存放任何密钥
+- **完整 CLI**：`modelclaw` 命令提供配置向导、单轮/多轮对话、模型列表、连通性测试、历史结果管理等全套入口（见下文「CLI 命令」）
+
+## CLI 命令
+
+Windows 下通过 `modelclaw.bat` 启动（自动使用 `.venv` 中的 Python），也可直接 `python modelclaw.py <命令>`。
+
+```bash
+modelclaw configure                              # 交互式配置向导（回车保留当前值）
+modelclaw configure --api-key ms-xxx \
+    --base-url https://api-inference.modelscope.cn/v1 \
+    --model deepseek-ai/DeepSeek-V4.1-Flash      # 非交互式，一步到位
+
+modelclaw chat "用一句话介绍你自己"              # 单轮提问，流式输出并保存结果
+modelclaw chat                                    # 进入多轮对话 REPL
+modelclaw chat "写代码" --temperature 0.2 --no-save   # 临时覆盖参数 / 不保存
+
+modelclaw config      # 查看当前生效配置（API 密钥打码显示）
+modelclaw models      # 列出当前 API 可用的模型
+modelclaw ping        # 连通性 + 认证测试，报告延迟
+modelclaw history     # 列出 output/ 下所有已保存结果（别名 ls）
+modelclaw show 171114 # 查看某次结果，支持时间戳片段模糊匹配
+modelclaw clean -y    # 清理结果文件；--logs 连日志一起删；--all 清空 output/
+```
+
+多轮对话 REPL 内可用命令：`/save`（保存上一轮结果）、`/clear`（清空上下文）、`/help`、`/exit`。
+
+| 命令 | 说明 |
+|---|---|
+| `configure` | 设置 `base_url` / `model`（写入 `config.json`）和 `api_key`（写入 `.env`），交互式或用参数非交互 |
+| `chat`（别名 `send`） | 发送消息：带消息=单轮；不带=多轮对话。支持 `--system` / `--model` / `--temperature` / `--no-save` |
+| `config` | 打印当前生效配置，密钥打码 |
+| `models` | 调用 API 列出可用模型 ID |
+| `ping` | GET `/models` 测连通性与延迟，验证密钥有效性 |
+| `history`（别名 `ls`） | 按时间列出已保存的结果文件及大小 |
+| `show` | 查看结果文件内容，接受完整文件名或时间戳片段 |
+| `clean` | 删除结果文件，`--logs` 含日志、`--all` 清空目录、`-y` 跳过确认 |
 
 ## 项目架构
 
@@ -86,11 +122,11 @@ source .venv/Scripts/activate
 # 2. 安装依赖
 pip install -r requirements.txt
 
-# 3. 配置密钥：在 .env 中写入你的 ModelScope Token
-#    MODELSCOPE_API_KEY=ms-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+# 3. 配置密钥与模型（交互式向导）
+modelclaw configure
 
-# 4. 运行
-python main.py
+# 4. 开始对话
+modelclaw chat "你好"
 ```
 
 > 注意：`requirements.txt` 为 UTF-16 编码，编辑时请保留原编码或统一转为 UTF-8。
@@ -127,7 +163,9 @@ Result saved to: output/result_20260916_171114.json
 
 ```
 modelclaw/
-├── main.py                # 入口
+├── modelclaw.py           # CLI 入口：configure / chat / config / models / ping / history / show / clean
+├── modelclaw.bat          # Windows 启动器（自动使用 .venv 的 Python）
+├── main.py                # 简单入口示例：一次完整调用流程
 ├── api_client.py          # API 请求 + 重试
 ├── storage.py             # 结果存文件
 ├── logger.py              # 日志初始化
@@ -153,6 +191,6 @@ modelclaw/
 
 ## 后续规划
 
-- 支持命令行传入 prompt（当前硬编码为「你好」）
-- 支持多轮对话
+- 支持指定保存格式（`--format md`）
+- 多轮对话历史持久化与恢复
 - 引入 pytest 测试套件

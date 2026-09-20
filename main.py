@@ -21,16 +21,16 @@ def main() -> int:
     setup_logging(cfg)
 
     logger = logging.getLogger(__name__)
-    prompt = "你好"
+    messages = [{"role": "user", "content": "你好"}]
 
     client = create_client(cfg)
     try:
-        result = ask(client, cfg, prompt)
+        result = ask(client, cfg, messages)
     except Exception as exc:
         logger.error("Request failed after all retries: %s", exc)
         return 1
 
-    path = save_result(cfg, prompt, result)
+    path = save_result(cfg, messages[-1]["content"], result)
     print(f"\nResult saved to: {path}")
     return 0
 

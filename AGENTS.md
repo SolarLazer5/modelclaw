@@ -14,7 +14,9 @@ Guidance for AI coding agents working in this repository.
 
 | File | Purpose |
 |------|---------|
-| `main.py` | Entry point: loads `.env` + `config.json`, sets up logging, calls the model via `api_client.ask()`, saves the result via `storage.save_result()`. |
+| `modelclaw.py` | CLI entry point (argparse, stdlib only): `configure` (set api_key/base_url/model), `chat`/`send` (one-shot or multi-turn REPL with `/save` `/clear` `/exit`), `config` (show, key masked), `models`, `ping`, `history`/`ls`, `show` (fuzzy timestamp match), `clean`. |
+| `modelclaw.bat` | Windows launcher that runs `modelclaw.py` with the `.venv` interpreter, so `modelclaw configure` works without activating the venv. |
+| `main.py` | Simple entry example: loads `.env` + `config.json`, sets up logging, calls the model via `api_client.ask()`, saves the result via `storage.save_result()`. |
 | `api_client.py` | Builds the OpenAI client from the `api` config group (key from `MODELSCOPE_API_KEY` env var) and sends streaming chat requests with tenacity retry driven by the `retry` config group (max_attempts=5, exponential backoff 1s→2s→4s→8s→16s capped at 30s). |
 | `storage.py` | Saves results to `output/{prefix}_YYYYMMDD_HHMMSS.{json|md|txt}` per the `storage` config group, optionally with metadata (prompt/model/timestamp/reasoning). |
 | `logger.py` | `setup_logging()`: configures root logger from the `logging` config group (level + `output/app.log`, also echoed to console). |
