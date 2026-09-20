@@ -1,5 +1,7 @@
 """modelclaw CLI: command-line interface for configuration, chat, and result management.
 
+Built with typer + rich.
+
 Usage:
     modelclaw configure              # interactively set api_key / base_url / model
     modelclaw chat "你好"            # one-shot message
@@ -12,28 +14,43 @@ Usage:
     modelclaw clean                  # remove saved results
 """
 
-import argparse
 import json
 import logging
 import os
 import sys
 import time
 from pathlib import Path
+from typing import Annotated, Optional
 
+import typer
 from dotenv import load_dotenv, set_key
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.syntax import Syntax
+from rich.table import Table
 
 from api_client import ask, create_client
 from logger import setup_logging
 from main import load_config
 from storage import save_result
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 CONFIG_PATH = "config.json"
 ENV_PATH = ".env"
 ENV_KEY_NAME = "MODELSCOPE_API_KEY"
 
 logger = logging.getLogger("modelclaw")
+console = Console()
+err_console = Console(stderr=True)
+
+app = typer.Typer(
+    help="modelclaw — 配置化的大模型 CLI 客户端",
+    add_completion=False,
+    no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -48,13 +65,13 @@ def mask_key(key: str) -> str:
     return f"{key[:6]}...{key[-4:]}"
 
 
-def apply_overrides(cfg: dict, args: argparse.Namespace) -> dict:
+def apply_overrides(cfg: dict, model: Optional[str], temperature: Optional[float]) -> dict:
     """Return a config copy with CLI --model / --temperature overrides applied."""
     cfg = json.loads(json.dumps(cfg))  # cheap deep copy
-    if getattr(args, "model", None):
-        cfg["api"]["model"] = args.model
-    if getattr(args, "temperature", None) is not None:
-        cfg["api"]["temperature"] = args.temperature
+    if model:
+        cfg["api"]["model"] = model
+    if temperature is not None:
+        cfg["api"]["temperature"] = temperature
     return cfg
 
 
@@ -76,31 +93,47 @@ def find_result_file(cfg: dict, name: str) -> Path:
     )
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(f"modelclaw {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _app_callback(
+    version: Annotated[
+        bool, typer.Option("--version", callback=_version_callback, is_eager=True, help="显示版本号")
+    ] = False,
+) -> None:
+    """modelclaw — 配置化的大模型 CLI 客户端"""
+
+
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
 
-def cmd_configure(args: argparse.Namespace) -> int:
-    """Set api_key (.env), base_url and model (config.json)."""
+@app.command()
+def configure(
+    api_key: Annotated[Optional[str], typer.Option("--api-key", help="API 密钥（写入 .env，不进入 git）")] = None,
+    base_url: Annotated[Optional[str], typer.Option("--base-url", help="API 服务器地址（写入 config.json）")] = None,
+    model: Annotated[Optional[str], typer.Option("--model", help="模型名（写入 config.json）")] = None,
+) -> None:
+    """设置 api_key / base_url / model（交互式向导，或用参数一步到位）"""
     cfg = load_config(CONFIG_PATH)
     api_cfg = cfg.setdefault("api", {})
 
-    base_url = args.base_url
-    model = args.model
-    api_key = args.api_key
+    if not (api_key and base_url and model):
+        console.print(Panel.fit("modelclaw 配置向导（直接回车保留当前值）", border_style="cyan"))
 
-    if not (base_url and model and api_key):
-        print("modelclaw 配置向导（直接回车保留当前值）\n")
     if not base_url:
-        base_url = input(f"Base URL [{api_cfg.get('base_url', '')}]: ").strip() \
-            or api_cfg.get("base_url", "")
+        base_url = Prompt.ask("Base URL", default=api_cfg.get("base_url", ""))
     if not model:
-        model = input(f"Model [{api_cfg.get('model', '')}]: ").strip() \
-            or api_cfg.get("model", "")
+        model = Prompt.ask("Model", default=api_cfg.get("model", ""))
     if not api_key:
         existing = os.environ.get(ENV_KEY_NAME, "")
-        entered = input(f"API Key [{mask_key(existing)}, 回车保持不变]: ").strip()
-        api_key = entered or existing
+        console.print(f"当前 API Key: [dim]{mask_key(existing)}[/dim]")
+        entered = Prompt.ask("API Key（密码式输入，回车保持不变）", password=True, default="")
+        api_key = entered.strip() or existing
 
     api_cfg["base_url"] = base_url
     api_cfg["model"] = model
@@ -110,81 +143,93 @@ def cmd_configure(args: argparse.Namespace) -> int:
     if api_key:
         set_key(ENV_PATH, ENV_KEY_NAME, api_key)
 
-    print(f"\n配置已保存：")
-    print(f"  base_url = {base_url}")
-    print(f"  model    = {model}")
-    print(f"  api_key  = {mask_key(api_key)}  (写入 {ENV_PATH})")
-    return 0
+    console.print("\n[green]√ 配置已保存[/green]")
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_row("base_url", base_url)
+    table.add_row("model", model)
+    table.add_row("api_key", f"{mask_key(api_key)}  [dim](写入 {ENV_PATH})[/dim]")
+    console.print(table)
 
 
-def cmd_config(args: argparse.Namespace) -> int:
-    """Show the current effective configuration (API key masked)."""
+@app.command(name="config")
+def show_config() -> None:
+    """查看当前生效配置（API 密钥打码显示）"""
     cfg = load_config(CONFIG_PATH)
     display = json.loads(json.dumps(cfg))
-    display["api"]["api_key"] = mask_key(os.environ.get(ENV_KEY_NAME, "")) \
-        + f"  (from {ENV_PATH}:{ENV_KEY_NAME})"
-    print(json.dumps(display, ensure_ascii=False, indent=4))
-    return 0
+    display["api"]["api_key"] = mask_key(os.environ.get(ENV_KEY_NAME, ""))
+    console.print(Syntax(json.dumps(display, ensure_ascii=False, indent=4), "json", theme="ansi_dark"))
+    console.print(f"[dim]api_key 来源: {ENV_PATH} 的 {ENV_KEY_NAME}[/dim]")
 
 
-def cmd_chat(args: argparse.Namespace) -> int:
-    """One-shot message or interactive multi-turn session."""
-    cfg = apply_overrides(load_config(CONFIG_PATH), args)
+@app.command()
+def chat(
+    message: Annotated[Optional[str], typer.Argument(help="要发送的消息；不提供则进入多轮对话")] = None,
+    system: Annotated[Optional[str], typer.Option("--system", "-s", help="system prompt")] = None,
+    model: Annotated[Optional[str], typer.Option("--model", "-m", help="临时覆盖模型名")] = None,
+    temperature: Annotated[Optional[float], typer.Option("--temperature", "-t", help="临时覆盖 temperature")] = None,
+    no_save: Annotated[bool, typer.Option("--no-save", help="不保存结果文件")] = False,
+) -> None:
+    """发送消息；不带消息则进入多轮对话 REPL"""
+    cfg = apply_overrides(load_config(CONFIG_PATH), model, temperature)
     setup_logging(cfg)
     client = create_client(cfg)
 
-    if args.message:
+    if message:
         messages = []
-        if args.system:
-            messages.append({"role": "system", "content": args.system})
-        messages.append({"role": "user", "content": args.message})
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": message})
         try:
             result = ask(client, cfg, messages)
         except Exception as exc:
             logger.error("Request failed after all retries: %s", exc)
-            return 1
-        if not args.no_save:
-            path = save_result(cfg, args.message, result)
-            print(f"\nResult saved to: {path}")
-        return 0
+            err_console.print(f"\n[red]× 请求失败（已重试至上限）: {exc}[/red]")
+            raise typer.Exit(1)
+        if not no_save:
+            path = save_result(cfg, message, result)
+            console.print(f"\n[dim]Result saved to: {path}[/dim]")
+        return
 
-    return _chat_repl(client, cfg, args)
+    _chat_repl(client, cfg, system)
 
 
-def _chat_repl(client, cfg: dict, args: argparse.Namespace) -> int:
-    print(f"进入多轮对话（模型: {cfg['api']['model']}）")
-    print("命令：/save 保存上一轮结果 · /clear 清空上下文 · /exit 退出\n")
+def _chat_repl(client, cfg: dict, system: Optional[str]) -> None:
+    console.print(Panel.fit(
+        f"多轮对话 · 模型: [bold]{cfg['api']['model']}[/bold]\n"
+        "[dim]/save 保存上一轮结果 · /clear 清空上下文 · /help 帮助 · /exit 退出[/dim]",
+        border_style="cyan",
+    ))
 
     messages = []
-    if args.system:
-        messages.append({"role": "system", "content": args.system})
+    if system:
+        messages.append({"role": "system", "content": system})
     last = None  # (prompt, result) of the latest exchange
 
     while True:
         try:
-            user_input = input("you> ").strip()
+            user_input = console.input("[bold green]you>[/bold green] ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nbye.")
-            return 0
+            console.print("\n[dim]bye.[/dim]")
+            return
         if not user_input:
             continue
         if user_input in ("/exit", "/quit"):
-            print("bye.")
-            return 0
+            console.print("[dim]bye.[/dim]")
+            return
         if user_input == "/clear":
             messages = [m for m in messages if m["role"] == "system"]
             last = None
-            print("(上下文已清空)")
+            console.print("[dim](上下文已清空)[/dim]")
             continue
         if user_input == "/save":
             if last:
                 path = save_result(cfg, last[0], last[1])
-                print(f"(已保存到 {path})")
+                console.print(f"[dim](已保存到 {path})[/dim]")
             else:
-                print("(还没有可保存的对话)")
+                console.print("[dim](还没有可保存的对话)[/dim]")
             continue
         if user_input == "/help":
-            print("命令：/save 保存上一轮结果 · /clear 清空上下文 · /exit 退出")
+            console.print("[dim]/save 保存上一轮结果 · /clear 清空上下文 · /exit 退出[/dim]")
             continue
 
         messages.append({"role": "user", "content": user_input})
@@ -192,6 +237,7 @@ def _chat_repl(client, cfg: dict, args: argparse.Namespace) -> int:
             result = ask(client, cfg, messages)
         except Exception as exc:
             logger.error("Request failed after all retries: %s", exc)
+            err_console.print(f"[red]× 请求失败（已重试至上限）: {exc}[/red]")
             messages.pop()  # don't keep the failed user turn
             continue
         messages.append({"role": "assistant", "content": result["answer"]})
@@ -199,41 +245,48 @@ def _chat_repl(client, cfg: dict, args: argparse.Namespace) -> int:
         print()
 
 
-def cmd_models(args: argparse.Namespace) -> int:
-    """List models available on the configured API."""
+# chat 的别名：modelclaw send
+app.command("send", help="chat 的别名")(chat)
+
+
+@app.command()
+def models() -> None:
+    """列出当前 API 可用的模型"""
     cfg = load_config(CONFIG_PATH)
     setup_logging(cfg)
     client = create_client(cfg)
     try:
-        models = client.models.list()
+        with console.status(f"正在获取模型列表 ({cfg['api']['base_url']}) ..."):
+            model_list = client.models.list()
     except Exception as exc:
         logger.error("Failed to list models: %s", exc)
-        return 1
-    for m in models.data:
-        print(m.id)
-    return 0
+        err_console.print(f"[red]× 获取模型列表失败: {exc}[/red]")
+        raise typer.Exit(1)
+    for m in model_list.data:
+        console.print(f"  {m.id}")
 
 
-def cmd_ping(args: argparse.Namespace) -> int:
-    """Connectivity test against the configured API."""
+@app.command()
+def ping() -> None:
+    """API 连通性 + 认证测试"""
     cfg = load_config(CONFIG_PATH)
     setup_logging(cfg)
-    api_cfg = cfg["api"]
-    print(f"Pinging {api_cfg['base_url']} ...")
+    base_url = cfg["api"]["base_url"]
     try:
         client = create_client(cfg)
-        start = time.perf_counter()
-        client.models.list()
-        latency = (time.perf_counter() - start) * 1000
+        with console.status(f"Pinging {base_url} ..."):
+            start = time.perf_counter()
+            client.models.list()
+            latency = (time.perf_counter() - start) * 1000
     except Exception as exc:
-        print(f"FAILED: {exc}")
-        return 1
-    print(f"OK ({latency:.0f} ms) — 认证有效，服务可用")
-    return 0
+        err_console.print(f"[red]× FAILED: {exc}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]√ OK ({latency:.0f} ms)[/green] — 认证有效，服务可用")
 
 
-def cmd_history(args: argparse.Namespace) -> int:
-    """List saved result files."""
+@app.command()
+def history() -> None:
+    """列出 output/ 下所有已保存的结果文件"""
     cfg = load_config(CONFIG_PATH)
     storage_cfg = cfg.get("storage", {})
     output_dir = Path(storage_cfg.get("output_dir", "output"))
@@ -241,126 +294,106 @@ def cmd_history(args: argparse.Namespace) -> int:
 
     files = sorted(output_dir.glob(f"{prefix}_*.*"), key=lambda p: p.stat().st_mtime)
     if not files:
-        print(f"( {output_dir}/ 下还没有保存的结果 )")
-        return 0
-    print(f"{'文件':<40} {'大小':>8}  修改时间")
+        console.print(f"[dim]( {output_dir}/ 下还没有保存的结果 )[/dim]")
+        return
+
+    table = Table(title=f"已保存的结果（{output_dir}/）", header_style="bold cyan")
+    table.add_column("文件", style="bold")
+    table.add_column("大小", justify="right")
+    table.add_column("修改时间")
     for f in files:
         stat = f.stat()
         mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
-        print(f"{f.name:<40} {stat.st_size:>7}B  {mtime}")
-    return 0
+        table.add_row(f.name, f"{stat.st_size}B", mtime)
+    console.print(table)
 
 
-def cmd_show(args: argparse.Namespace) -> int:
-    """Print the content of a saved result file."""
+# history 的别名：modelclaw ls
+app.command("ls", help="history 的别名")(history)
+
+
+@app.command()
+def show(
+    file: Annotated[str, typer.Argument(help="文件名或时间戳片段，如 result_20260916_171114.json 或 171114")],
+) -> None:
+    """查看某个保存的结果（支持时间戳片段模糊匹配）"""
     cfg = load_config(CONFIG_PATH)
     try:
-        path = find_result_file(cfg, args.file)
+        path = find_result_file(cfg, file)
     except FileNotFoundError as exc:
-        print(exc)
-        return 1
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
 
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".json":
         data = json.loads(text)
-        for key in ("prompt", "model", "timestamp"):
-            if key in data:
-                print(f"{key}: {data[key]}")
+        meta = "  ".join(
+            f"[bold]{k}[/bold]: {data[k]}" for k in ("prompt", "model", "timestamp") if k in data
+        )
+        console.print(Panel(meta, title=path.name, border_style="cyan"))
         if data.get("reasoning"):
-            print(f"\n === Thinking ===\n\n{data['reasoning']}")
-        print(f"\n === Final Answer ===\n\n{data.get('answer', '')}")
+            console.rule("[dim]Thinking[/dim]")
+            console.print(f"[dim]{data['reasoning']}[/dim]")
+        console.rule("[bold]Final Answer[/bold]")
+        console.print(data.get("answer", ""))
     else:
-        print(text)
-    return 0
+        console.print(text)
 
 
-def cmd_clean(args: argparse.Namespace) -> int:
-    """Delete saved result files (and optionally logs)."""
+@app.command()
+def clean(
+    logs: Annotated[bool, typer.Option("--logs", help="同时删除日志文件")] = False,
+    all_files: Annotated[bool, typer.Option("--all", help="删除 output 下所有文件")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="跳过确认")] = False,
+) -> None:
+    """清理 output 目录中的结果文件"""
     cfg = load_config(CONFIG_PATH)
     storage_cfg = cfg.get("storage", {})
     output_dir = Path(storage_cfg.get("output_dir", "output"))
     prefix = storage_cfg.get("filename_prefix", "result")
 
     targets = list(output_dir.glob(f"{prefix}_*.*")) if output_dir.is_dir() else []
-    if args.logs or args.all:
+    if logs or all_files:
         log_file = Path(cfg.get("logging", {}).get("log_file", "output/app.log"))
         if log_file.is_file():
             targets.append(log_file)
-    if args.all:
+    if all_files:
         targets = [p for p in output_dir.glob("*") if p.is_file()] if output_dir.is_dir() else []
 
     if not targets:
-        print("(没有需要清理的文件)")
-        return 0
-    if not args.yes:
+        console.print("[dim](没有需要清理的文件)[/dim]")
+        return
+    if not yes:
         for t in targets:
-            print(f"  {t}")
-        confirm = input(f"确认删除以上 {len(targets)} 个文件？[y/N] ").strip().lower()
-        if confirm != "y":
-            print("已取消")
-            return 0
+            console.print(f"  {t}")
+        if not Confirm.ask(f"确认删除以上 {len(targets)} 个文件？", default=False):
+            console.print("[dim]已取消[/dim]")
+            return
     for t in targets:
         t.unlink()
-    print(f"已删除 {len(targets)} 个文件")
-    return 0
+    console.print(f"[green]√ 已删除 {len(targets)} 个文件[/green]")
 
 
 # ---------------------------------------------------------------------------
-# argument parsing
+# entry point
 # ---------------------------------------------------------------------------
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="modelclaw",
-        description="modelclaw — 配置化的大模型 CLI 客户端",
-    )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    p = sub.add_parser("configure", help="设置 api_key / base_url / model")
-    p.add_argument("--api-key", help="API 密钥（写入 .env，不进入 git）")
-    p.add_argument("--base-url", help="API 服务器地址（写入 config.json）")
-    p.add_argument("--model", help="模型名（写入 config.json）")
-    p.set_defaults(func=cmd_configure)
-
-    p = sub.add_parser("config", help="查看当前配置（密钥打码）")
-    p.set_defaults(func=cmd_config)
-
-    p = sub.add_parser("chat", aliases=["send"], help="发送消息；不带消息则进入多轮对话")
-    p.add_argument("message", nargs="?", help="要发送的消息")
-    p.add_argument("--system", help="system prompt")
-    p.add_argument("--model", help="临时覆盖模型名")
-    p.add_argument("--temperature", type=float, help="临时覆盖 temperature")
-    p.add_argument("--no-save", action="store_true", help="不保存结果文件")
-    p.set_defaults(func=cmd_chat)
-
-    p = sub.add_parser("models", help="列出 API 可用模型")
-    p.set_defaults(func=cmd_models)
-
-    p = sub.add_parser("ping", help="API 连通性测试")
-    p.set_defaults(func=cmd_ping)
-
-    p = sub.add_parser("history", aliases=["ls"], help="列出已保存的结果文件")
-    p.set_defaults(func=cmd_history)
-
-    p = sub.add_parser("show", help="查看某个保存的结果（支持时间戳片段匹配）")
-    p.add_argument("file", help="文件名或时间戳片段，如 result_20260916_171114.json 或 171114")
-    p.set_defaults(func=cmd_show)
-
-    p = sub.add_parser("clean", help="清理 output 目录中的结果文件")
-    p.add_argument("--logs", action="store_true", help="同时删除日志文件")
-    p.add_argument("--all", action="store_true", help="删除 output 下所有文件")
-    p.add_argument("-y", "--yes", action="store_true", help="跳过确认")
-    p.set_defaults(func=cmd_clean)
-
-    return parser
-
-
-def main(argv=None) -> int:
+def main() -> None:
     load_dotenv()
-    args = build_parser().parse_args(argv)
-    return args.func(args)
+    # Windows GBK console can't encode emoji etc. — replace instead of crashing mid-stream
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+    try:
+        app(prog_name="modelclaw")
+    except BrokenPipeError:
+        # stdout closed early by the consumer (e.g. `modelclaw models | head`), exit quietly
+        os._exit(0)
+    except OSError as exc:
+        if exc.errno in (22, 32):  # same situation on Windows legacy console renderer
+            os._exit(0)
+        raise
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

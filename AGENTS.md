@@ -14,7 +14,7 @@ Guidance for AI coding agents working in this repository.
 
 | File | Purpose |
 |------|---------|
-| `modelclaw.py` | CLI entry point (argparse, stdlib only): `configure` (set api_key/base_url/model), `chat`/`send` (one-shot or multi-turn REPL with `/save` `/clear` `/exit`), `config` (show, key masked), `models`, `ping`, `history`/`ls`, `show` (fuzzy timestamp match), `clean`. |
+| `modelclaw.py` | CLI entry point (**typer + Rich**): `configure` (set api_key/base_url/model, password-style key prompt), `chat`/`send` (one-shot or multi-turn REPL with `/save` `/clear` `/exit`), `config` (show, key masked), `models`, `ping`, `history`/`ls`, `show` (fuzzy timestamp match), `clean`. Rich renders tables/panels/syntax highlighting; `--version` is an eager option; stdout/stderr are reconfigured with `errors="replace"` for Windows GBK consoles. |
 | `modelclaw.bat` | Windows launcher that runs `modelclaw.py` with the `.venv` interpreter, so `modelclaw configure` works without activating the venv. |
 | `main.py` | Simple entry example: loads `.env` + `config.json`, sets up logging, calls the model via `api_client.ask()`, saves the result via `storage.save_result()`. |
 | `api_client.py` | Builds the OpenAI client from the `api` config group (key from `MODELSCOPE_API_KEY` env var) and sends streaming chat requests with tenacity retry driven by the `retry` config group (max_attempts=5, exponential backoff 1s→2s→4s→8s→16s capped at 30s). |
@@ -23,7 +23,7 @@ Guidance for AI coding agents working in this repository.
 | `config.json` | Runtime configuration, now actually loaded by the code. Points to ModelScope (`https://api-inference.modelscope.cn/v1`, `deepseek-ai/DeepSeek-V4.1-Flash`); `api_key` stays empty — the real key is injected from `.env`. See `doc/config字段说明.md` for the field reference. |
 | `README.md` | Project introduction, architecture, features, config reference, and quick-start guide (Chinese). |
 | `doc/config字段说明.md` | Chinese field-by-field documentation of `config.json` and the module layout (api_client / storage / logger). |
-| `requirements.txt` | Pinned dependencies. **Note: this file is UTF-16 encoded**, so plain UTF-8 readers may show garbled text. Key direct dependencies: `openai==3.14.0`, `requests`, `python-dotenv`, `PyYAML`, `tenacity`, `pydantic`. |
+| `requirements.txt` | Pinned dependencies. **Note: this file is UTF-16 encoded**, so plain UTF-8 readers may show garbled text. Key direct dependencies: `openai==3.14.0`, `typer==0.27.2`, `rich==15.0.0`, `requests`, `python-dotenv`, `PyYAML`, `tenacity`, `pydantic`. |
 | `.env` | Holds `MODELSCOPE_API_KEY` (the real ModelScope token); gitignored. |
 | `.gitignore` | Excludes `.venv/`, `__pycache__/`, `*.pyc`, `.env`, `output/`, `.vscode/`. |
 
@@ -50,7 +50,7 @@ There is **no test framework or test directory** in this project. If you add log
 ## Code Style
 
 - Standard Python 3.12, 4-space indentation (per `.vscode/settings.json`: format on save/paste enabled, tab size 4).
-- The existing code is simple top-level script style (no functions/classes yet). Keep it simple; do not introduce frameworks or abstractions that the project does not need.
+- The CLI (`modelclaw.py`) uses typer command functions and Rich for output; the core modules (`api_client.py`, `storage.py`, `logger.py`, `main.py`) stay simple top-level script style. Keep it simple; do not introduce frameworks or abstractions that the project does not need.
 - Comments and documentation are in **English** (the only non-English content is a Chinese greeting string `'你好'` used as a demo prompt). Write new comments/docs in English.
 
 ## Security Considerations
