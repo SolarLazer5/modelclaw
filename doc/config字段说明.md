@@ -47,19 +47,34 @@
 | `level` | 日志级别 | `DEBUG`（最详细）→ `INFO`（常规）→ `WARNING` → `ERROR`。开发期用 `INFO`，排查问题临时改 `DEBUG` |
 | `log_file` | 日志文件路径 | 运行记录写进这个文件。API 调用失败、重试了几次、最终成功与否，都能在这里查到 |
 
-## 五、配置在代码中的流转
+## 五、memory —— 会话记忆配置
+
+多轮对话的持久化与上下文工程（M1 新增，对应 `session_store.py` + `context_engine.py`；M1.5 起支持双后端）。
+
+| 字段 | 作用 | 说明 |
+|---|---|---|
+| `backend` | 存储后端 | `sqlite`（默认，零配置本地文件）或 `postgres`（服务端数据库，适合多用户/服务化部署）。切换后所有会话功能不变——上层代码只依赖接口，不感知底层 |
+| `db_path` | 会话数据库路径 | 仅 sqlite 后端使用。默认 `output/sessions.db`，已随 `output/` 被 gitignore |
+| `postgres` | PG 连接参数 | 仅 postgres 后端使用：`host` / `port` / `user` / `database`（库不存在会自动创建）。**密码不在这里**，走 `.env` 的 `MODELCLAW_PG_PASSWORD` |
+| `max_context_tokens` | 上下文硬上限 | 每次请求前用 `trim_messages` 把历史裁剪到这个 token 数以内（tiktoken cl100k_base 近似计数）。超过模型上下文窗口会报 400，这个值是安全阀 |
+| `summary_trigger_tokens` | 摘要触发阈值 | 历史超过这个 token 数时，自动把最老的几轮交给 LLM 压成「滚动摘要」存进库，原始消息删除。调小可观察摘要触发，调大则少用摘要省 token |
+| `keep_recent_turns` | 摘要保留轮数 | 触发摘要时，最近 N 轮对话保留原文不压缩（保证近期上下文精确），更早的才进摘要 |
+
+## 六、配置在代码中的流转
 
 ```
 load_config() 读取
     ↓
-api_client.py   用 api + retry 组 → 发请求、失败重试
-storage.py      用 storage 组    → 存结果文件
-logger.py       用 logging 组    → 写日志
+api_client.py      用 api + retry 组 → 发请求、失败重试
+storage.py         用 storage 组    → 存结果文件
+logger.py          用 logging 组    → 写日志
+session_store.py   用 memory 组     → SQLite 会话存取
+context_engine.py  用 memory 组     → 裁剪 + 滚动摘要
 ```
 
-四个配置组正好对应三个模块，职责清晰。每个字段将来都可以在不改代码的情况下调整——这就是配置化的意义：调参是改文件的事，不是改逻辑的事。
+五个配置组正好对应五个模块，职责清晰。每个字段将来都可以在不改代码的情况下调整——这就是配置化的意义：调参是改文件的事，不是改逻辑的事。
 
-## 六、使用备忘
+## 七、使用备忘
 
 - JSON 不支持注释，想给字段写备忘，可用 `"_说明_xxx": "内容"` 形式，代码读取时忽略
 - JSON 不允许尾随逗号，最后一个字段后面不能多逗号

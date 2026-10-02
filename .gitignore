@@ -5,3 +5,4 @@ __pycache__/
 output/
 .vscode/
 AGENTS.md
+temp/

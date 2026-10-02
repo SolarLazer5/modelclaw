@@ -6,6 +6,8 @@ Usage:
     modelclaw configure              # interactively set api_key / base_url / model
     modelclaw chat "你好"            # one-shot message
     modelclaw chat                   # interactive multi-turn session
+    modelclaw chat --resume <id>     # resume a persisted session
+    modelclaw sessions               # list / delete chat sessions
     modelclaw config                 # show current effective config
     modelclaw models                 # list available models
     modelclaw ping                   # connectivity test
@@ -25,17 +27,20 @@ from typing import Annotated, Optional
 import typer
 from dotenv import load_dotenv, set_key
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.syntax import Syntax
 from rich.table import Table
 
 from api_client import ask, create_client
+from context_engine import build_context, count_tokens
 from logger import setup_logging
 from main import load_config
+from session_store import SessionStore, create_session_store
 from storage import save_result
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 CONFIG_PATH = "config.json"
 ENV_PATH = ".env"
@@ -170,41 +175,49 @@ def chat(
     model: Annotated[Optional[str], typer.Option("--model", "-m", help="临时覆盖模型名")] = None,
     temperature: Annotated[Optional[float], typer.Option("--temperature", "-t", help="临时覆盖 temperature")] = None,
     no_save: Annotated[bool, typer.Option("--no-save", help="不保存结果文件")] = False,
+    session: Annotated[Optional[str], typer.Option("--session", help="使用指定 ID 的会话（不存在则创建）")] = None,
+    resume: Annotated[Optional[str], typer.Option("--resume", "-r", help="恢复历史会话（ID 或片段）")] = None,
 ) -> None:
-    """发送消息；不带消息则进入多轮对话 REPL"""
+    """发送消息；不带消息则进入多轮对话 REPL（会话自动持久化到 SQLite）"""
     cfg = apply_overrides(load_config(CONFIG_PATH), model, temperature)
     setup_logging(cfg)
     client = create_client(cfg)
+    store = create_session_store(cfg)
+
+    if resume:
+        try:
+            session_id = store.find_session(resume)
+        except FileNotFoundError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+    else:
+        session_id = store.create_session(session)
 
     if message:
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": message})
+        store.add_message(session_id, "user", message)
+        context = build_context(client, cfg, store, session_id, system)
         try:
-            result = ask(client, cfg, messages)
+            result = ask(client, cfg, context)
         except Exception as exc:
             logger.error("Request failed after all retries: %s", exc)
             err_console.print(f"\n[red]× 请求失败（已重试至上限）: {exc}[/red]")
             raise typer.Exit(1)
+        store.add_message(session_id, "assistant", result["answer"])
         if not no_save:
             path = save_result(cfg, message, result)
             console.print(f"\n[dim]Result saved to: {path}[/dim]")
         return
 
-    _chat_repl(client, cfg, system)
+    _chat_repl(client, cfg, store, session_id, system)
 
 
-def _chat_repl(client, cfg: dict, system: Optional[str]) -> None:
+def _chat_repl(client, cfg: dict, store: SessionStore, session_id: str, system: Optional[str]) -> None:
     console.print(Panel.fit(
-        f"多轮对话 · 模型: [bold]{cfg['api']['model']}[/bold]\n"
-        "[dim]/save 保存上一轮结果 · /clear 清空上下文 · /help 帮助 · /exit 退出[/dim]",
+        f"多轮对话 · 模型: [bold]{cfg['api']['model']}[/bold] · 会话: [bold]{session_id}[/bold]\n"
+        "[dim]/save 保存上一轮结果 · /clear 清空上下文 · /session 会话信息 · /help 帮助 · /exit 退出[/dim]",
         border_style="cyan",
     ))
 
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
     last = None  # (prompt, result) of the latest exchange
 
     while True:
@@ -219,9 +232,18 @@ def _chat_repl(client, cfg: dict, system: Optional[str]) -> None:
             console.print("[dim]bye.[/dim]")
             return
         if user_input == "/clear":
-            messages = [m for m in messages if m["role"] == "system"]
+            store.clear_session(session_id)
             last = None
             console.print("[dim](上下文已清空)[/dim]")
+            continue
+        if user_input == "/session":
+            msgs = store.get_messages(session_id)
+            summary = store.get_summary(session_id)
+            console.print(
+                f"[dim]会话 {session_id} · 消息 {len(msgs)} 条（约 {count_tokens(msgs)} tokens）"
+                + (f" · 滚动摘要约 {count_tokens(summary)} tokens" if summary else "")
+                + "[/dim]"
+            )
             continue
         if user_input == "/save":
             if last:
@@ -231,18 +253,19 @@ def _chat_repl(client, cfg: dict, system: Optional[str]) -> None:
                 console.print("[dim](还没有可保存的对话)[/dim]")
             continue
         if user_input == "/help":
-            console.print("[dim]/save 保存上一轮结果 · /clear 清空上下文 · /exit 退出[/dim]")
+            console.print("[dim]/save 保存上一轮结果 · /clear 清空上下文 · /session 会话信息 · /exit 退出[/dim]")
             continue
 
-        messages.append({"role": "user", "content": user_input})
+        msg_id = store.add_message(session_id, "user", user_input)
+        context = build_context(client, cfg, store, session_id, system)
         try:
-            result = ask(client, cfg, messages)
+            result = ask(client, cfg, context)
         except Exception as exc:
             logger.error("Request failed after all retries: %s", exc)
             err_console.print(f"[red]× 请求失败（已重试至上限）: {exc}[/red]")
-            messages.pop()  # don't keep the failed user turn
+            store.delete_message(msg_id)  # don't keep the failed user turn
             continue
-        messages.append({"role": "assistant", "content": result["answer"]})
+        store.add_message(session_id, "assistant", result["answer"])
         last = (user_input, result)
         print()
 
@@ -315,6 +338,44 @@ app.command("ls", help="history 的别名")(history)
 
 
 @app.command()
+def sessions(
+    delete: Annotated[Optional[str], typer.Option("--delete", "-d", help="删除指定会话（ID 或片段）")] = None,
+) -> None:
+    """列出所有历史聊天会话（--delete 删除指定会话）"""
+    cfg = load_config(CONFIG_PATH)
+    store = create_session_store(cfg)
+
+    if delete:
+        try:
+            session_id = store.find_session(delete)
+        except FileNotFoundError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        store.delete_session(session_id)
+        console.print(f"[green]√ 已删除会话 {session_id}[/green]")
+        return
+
+    rows = store.list_sessions()
+    if not rows:
+        console.print("[dim](还没有任何会话，先 modelclaw chat 聊一轮吧)[/dim]")
+        return
+
+    table = Table(title="历史会话", header_style="bold cyan")
+    table.add_column("会话 ID", style="bold")
+    table.add_column("标题")
+    table.add_column("轮数", justify="right")
+    table.add_column("更新时间")
+    for r in rows:
+        table.add_row(
+            r["session_id"],
+            escape(r["title"]) if r["title"] else "[dim](空)[/dim]",
+            str(r["turns"]),
+            r["updated_at"],
+        )
+    console.print(table)
+
+
+@app.command()
 def show(
     file: Annotated[str, typer.Argument(help="文件名或时间戳片段，如 result_20260916_171114.json 或 171114")],
 ) -> None:
@@ -346,6 +407,7 @@ def show(
 def clean(
     logs: Annotated[bool, typer.Option("--logs", help="同时删除日志文件")] = False,
     all_files: Annotated[bool, typer.Option("--all", help="删除 output 下所有文件")] = False,
+    sessions_db: Annotated[bool, typer.Option("--sessions", help="同时删除会话数据库 sessions.db")] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="跳过确认")] = False,
 ) -> None:
     """清理 output 目录中的结果文件"""
@@ -359,6 +421,10 @@ def clean(
         log_file = Path(cfg.get("logging", {}).get("log_file", "output/app.log"))
         if log_file.is_file():
             targets.append(log_file)
+    if sessions_db and not all_files:
+        db_path = Path(cfg.get("memory", {}).get("db_path", "output/sessions.db"))
+        if db_path.is_file():
+            targets.append(db_path)
     if all_files:
         targets = [p for p in output_dir.glob("*") if p.is_file()] if output_dir.is_dir() else []
 
@@ -383,13 +449,14 @@ def clean(
 def main() -> None:
     load_dotenv()
 
-    # 遍历两个流
-    for stream in (sys.stdout, sys.stderr):
+    # 遍历三个流（stdin 也要：管道进来的非 GBK 字节会变成 surrogate escapes，
+    # 写进 SQLite 时会炸 'surrogates not allowed'，统一换成 replace 策略）
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
         if hasattr(stream, "reconfigure"):#如果这个流里面有reconfigure方法
             stream.reconfigure(errors="replace")#调用这个方法，将错误处理策略改为replace
      #总结:
      # 如果你有原地调参的本事，就把错误策略调成 replace；
-     # 如果没有（比如 Jupyter、StringIO），那说明你本来也不会在编码上炸，跳过即可。
+     # 如果没有（比如 Jupyter、StringIO），说明本来也不会在编码上炸，跳过即可。
 
     try:
         app(prog_name="modelclaw") #typer 应用程序入口

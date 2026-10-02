@@ -23,8 +23,11 @@ modelclaw configure --api-key ms-xxx \
     --model deepseek-ai/DeepSeek-V4.1-Flash      # 非交互式，一步到位
 
 modelclaw chat "用一句话介绍你自己"              # 单轮提问，流式输出并保存结果
-modelclaw chat                                    # 进入多轮对话 REPL
+modelclaw chat                                    # 进入多轮对话 REPL（会话自动持久化）
+modelclaw chat --resume 1757                      # 恢复历史会话（ID 片段模糊匹配），模型记得之前聊过什么
 modelclaw chat "写代码" --temperature 0.2 --no-save   # 临时覆盖参数 / 不保存
+
+modelclaw sessions     # 列出所有历史会话（ID / 标题 / 轮数 / 更新时间），--delete <片段> 删除
 
 modelclaw config      # 查看当前生效配置（API 密钥打码显示）
 modelclaw models      # 列出当前 API 可用的模型
@@ -34,12 +37,14 @@ modelclaw show 171114 # 查看某次结果，支持时间戳片段模糊匹配
 modelclaw clean -y    # 清理结果文件；--logs 连日志一起删；--all 清空 output/
 ```
 
-多轮对话 REPL 内可用命令：`/save`（保存上一轮结果）、`/clear`（清空上下文）、`/help`、`/exit`。
+多轮对话 REPL 内可用命令：`/save`（保存上一轮结果）、`/clear`（清空上下文）、`/session`（当前会话信息）、`/help`、`/exit`。
+会话持久化默认用 SQLite（`output/sessions.db`），在 `config.json` 里把 `memory.backend` 改成 `postgres` 即可切换到 PostgreSQL 后端（连接参数在 `memory.postgres`，密码走 `.env` 的 `MODELCLAW_PG_PASSWORD`）——上层功能完全一致，存储层可插拔。历史超过 `memory.summary_trigger_tokens` 时自动滚动摘要压缩，超过 `max_context_tokens` 时强制裁剪，长对话不爆上下文、成本可控。
 
 | 命令 | 说明 |
 |---|---|
 | `configure` | 设置 `base_url` / `model`（写入 `config.json`）和 `api_key`（写入 `.env`），交互式或用参数非交互 |
-| `chat`（别名 `send`） | 发送消息：带消息=单轮；不带=多轮对话。支持 `--system` / `--model` / `--temperature` / `--no-save` |
+| `chat`（别名 `send`） | 发送消息：带消息=单轮；不带=多轮对话。支持 `--system` / `--model` / `--temperature` / `--no-save` / `--session` / `--resume` |
+| `sessions` | 列出历史会话；`--delete <片段>` 删除指定会话 |
 | `config` | 打印当前生效配置，密钥打码 |
 | `models` | 调用 API 列出可用模型 ID |
 | `ping` | GET `/models` 测连通性与延迟，验证密钥有效性 |
@@ -163,8 +168,11 @@ Result saved to: output/result_20260916_171114.json
 
 ```
 modelclaw/
-├── modelclaw.py           # CLI 入口：configure / chat / config / models / ping / history / show / clean
+├── modelclaw.py           # CLI 入口：configure / chat(--resume) / sessions / config / models / ping / history / show / clean
 ├── modelclaw.bat          # Windows 启动器（自动使用 .venv 的 Python）
+├── session_store.py       # 会话持久化：SessionStore 抽象基类 + SQLite 实现 + 工厂（Repository 模式）
+├── postgres_store.py      # PostgreSQL 后端：memory.backend 切换，自动建库建表，密码走 .env
+├── context_engine.py      # 上下文工程：tiktoken 计数 / trim_messages 裁剪 / 滚动摘要压缩
 ├── main.py                # 简单入口示例：一次完整调用流程
 ├── api_client.py          # API 请求 + 重试
 ├── storage.py             # 结果存文件

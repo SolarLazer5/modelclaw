@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 RETRYABLE_ERRORS = (APIError, APITimeoutError, RateLimitError, APIConnectionError)
 
 
+def _retry_decorator(retry_cfg: dict):
+    """Build the shared tenacity retry decorator from the `retry` config group."""
+    return retry(
+        stop=stop_after_attempt(retry_cfg.get("max_attempts", 5)),
+        wait=wait_exponential(
+            multiplier=retry_cfg.get("initial_wait", 1),
+            exp_base=retry_cfg.get("backoff_multiplier", 2),
+            max=retry_cfg.get("max_wait", 30),
+        ),
+        retry=retry_if_exception_type(RETRYABLE_ERRORS),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+
+
 def create_client(cfg: dict) -> OpenAI:
     """Build an OpenAI-compatible client from the `api` section of config.json."""
     api_cfg = cfg["api"]
@@ -41,17 +56,7 @@ def ask(client: OpenAI, cfg: dict, messages: list) -> dict:
     api_cfg = cfg["api"]
     retry_cfg = cfg.get("retry", {})
 
-    @retry(
-        stop=stop_after_attempt(retry_cfg.get("max_attempts", 5)),
-        wait=wait_exponential(
-            multiplier=retry_cfg.get("initial_wait", 1),
-            exp_base=retry_cfg.get("backoff_multiplier", 2),
-            max=retry_cfg.get("max_wait", 30),
-        ),
-        retry=retry_if_exception_type(RETRYABLE_ERRORS),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-        reraise=True,
-    )
+    @_retry_decorator(retry_cfg)
     def _ask_once() -> dict:
         response = client.chat.completions.create(
             model=api_cfg["model"],
@@ -89,3 +94,27 @@ def ask(client: OpenAI, cfg: dict, messages: list) -> dict:
 
     logger.info("Sending request: model=%s", api_cfg["model"])
     return _ask_once()
+
+
+def complete(client: OpenAI, cfg: dict, messages: list) -> str:
+    """Non-streaming completion with the same retry policy.
+
+    Used by context_engine for rolling summarization, where streaming output
+    would just pollute the terminal.
+    """
+    api_cfg = cfg["api"]
+    retry_cfg = cfg.get("retry", {})
+
+    @_retry_decorator(retry_cfg)
+    def _complete_once() -> str:
+        response = client.chat.completions.create(
+            model=api_cfg["model"],
+            messages=messages,
+            temperature=api_cfg.get("temperature", 0.7),
+            max_tokens=api_cfg.get("max_tokens", 2048),
+            stream=False,
+        )
+        return response.choices[0].message.content or ""
+
+    logger.info("Sending non-streaming request: model=%s", api_cfg["model"])
+    return _complete_once()

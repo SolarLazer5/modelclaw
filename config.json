@@ -19,6 +19,19 @@
         "filename_prefix": "result",
         "save_metadata": true
     },
+    "memory": {
+        "backend": "postgres",
+        "db_path": "output/sessions.db",
+        "postgres": {
+            "host": "127.0.0.1",
+            "port": 5432,
+            "user": "postgres",
+            "database": "modelclaw"
+        },
+        "max_context_tokens": 4000,
+        "summary_trigger_tokens": 6000,
+        "keep_recent_turns": 4
+    },
     "logging": {
         "level": "INFO",
         "log_file": "output/app.log"
