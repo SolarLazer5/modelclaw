@@ -1,16 +1,18 @@
 # modelclaw
 
-一个基于 OpenAI 兼容客户端调用托管大模型推理 API 的轻量 Python 命令行项目。当前接入 **ModelScope** 推理服务，支持**流式输出**、**异常自动重试**、**结果落盘存档**和**运行日志**，所有行为均由 `config.json` 驱动，调参不改代码。
+一个基于 OpenAI 兼容客户端调用托管大模型推理 API 的轻量 Python 命令行项目。
 
 ## 功能特性
 
-- **流式对话输出**：实时打印模型回复，并将思考过程（`reasoning_content`，`=== Thinking ===`）与最终答案（`=== Final Answer ===`）分开展示
-- **异常重试**：基于 [tenacity](https://github.com/jd/tenacity) 的指数退避重试，覆盖超时、限流（429）、连接错误等可恢复异常；重试次数、等待序列、封顶时间全部可配置（默认 1s→2s→4s→8s→16s，封顶 30s，共 5 次），每次重试前写 WARNING 日志
-- **结果存文件**：每次调用的结果自动保存到 `output/` 目录，文件名带时间戳防覆盖（如 `result_20260916_171114.json`）；支持 `json` / `md` / `txt` 三种格式，可附带 prompt、模型名、时间戳、思考过程等元信息，便于回溯排查
+- **流式对话输出**：实时打印模型回复，思考过程（`reasoning_content`，`=== Thinking ===`）与最终答案（`=== Final Answer ===`）分开展示
+- **会话记忆**：多轮对话自动持久化（SQLite / PostgreSQL 双后端），退出不丢；`chat --resume` 恢复历史会话
+- **上下文工程**：每次请求前自动执行「滚动摘要压缩 → token 裁剪」流水线
+- **可插拔存储层**：修改memory.backend配置切换 SQLite ↔ PostgreSQL
+- **异常重试**：基于 [tenacity](https://github.com/jd/tenacity) 的指数退避重试，覆盖超时、限流（429）、连接错误等可恢复异常
+- **结果存文件**：对话结果自动保存到 `output/` 目录，文件名带时间戳防覆盖（如 `result_20260916_171114.json`）；支持 `json` / `md` / `txt` 三种格式，附带 prompt、模型名、时间戳、思考过程等元信息
 - **运行日志**：按配置级别同时输出到控制台和 `output/app.log`，API 请求、重试过程、文件保存路径全程可查
-- **配置化**：API 连接、重试策略、存储、日志四组参数集中在 `config.json`，换服务商/换模型/调重试参数只需改配置文件
-- **密钥隔离**：真实 API Token 放在 `.env`（已 gitignore），代码与配置文件中不存放任何密钥
-- **完整 CLI**：`modelclaw` 命令提供配置向导、单轮/多轮对话、模型列表、连通性测试、历史结果管理等全套入口（见下文「CLI 命令」）
+- **凭证隔离**：API Token、数据库密码只放 `.env`，代码与配置文件中不存放任何密钥
+- **CLI**：`typer + Rich` 实现，配置向导、单轮/多轮对话、会话管理、模型列表、连通性测试、历史结果管理全套入口
 
 ## CLI 命令
 
@@ -34,11 +36,11 @@ modelclaw models      # 列出当前 API 可用的模型
 modelclaw ping        # 连通性 + 认证测试，报告延迟
 modelclaw history     # 列出 output/ 下所有已保存结果（别名 ls）
 modelclaw show 171114 # 查看某次结果，支持时间戳片段模糊匹配
-modelclaw clean -y    # 清理结果文件；--logs 连日志一起删；--all 清空 output/
+modelclaw clean -y    # 清理结果文件；--logs 连日志一起删；--sessions 删会话库；--all 清空 output/
 ```
 
 多轮对话 REPL 内可用命令：`/save`（保存上一轮结果）、`/clear`（清空上下文）、`/session`（当前会话信息）、`/help`、`/exit`。
-会话持久化默认用 SQLite（`output/sessions.db`），在 `config.json` 里把 `memory.backend` 改成 `postgres` 即可切换到 PostgreSQL 后端（连接参数在 `memory.postgres`，密码走 `.env` 的 `MODELCLAW_PG_PASSWORD`）——上层功能完全一致，存储层可插拔。历史超过 `memory.summary_trigger_tokens` 时自动滚动摘要压缩，超过 `max_context_tokens` 时强制裁剪，长对话不爆上下文、成本可控。
+会话持久化默认用 SQLite（`output/sessions.db`），在 `config.json` 里把 `memory.backend` 改成 `postgres` 即可切换到 PostgreSQL 后端（连接参数在 `memory.postgres`，密码走 `.env` 的 `MODELCLAW_PG_PASSWORD`）——上层功能完全一致，存储层可插拔。
 
 | 命令 | 说明 |
 |---|---|
@@ -50,41 +52,54 @@ modelclaw clean -y    # 清理结果文件；--logs 连日志一起删；--all �
 | `ping` | GET `/models` 测连通性与延迟，验证密钥有效性 |
 | `history`（别名 `ls`） | 按时间列出已保存的结果文件及大小 |
 | `show` | 查看结果文件内容，接受完整文件名或时间戳片段 |
-| `clean` | 删除结果文件，`--logs` 含日志、`--all` 清空目录、`-y` 跳过确认 |
+| `clean` | 删除结果文件，`--logs` 含日志、`--sessions` 含会话库、`--all` 清空目录、`-y` 跳过确认 |
 
 ## 项目架构
 
+以 CLI 多轮对话为例，一次提问的完整链路：
+
 ```
-main.py            入口：串起整个流程
+modelclaw chat
     │
-    ├─ load_dotenv()        从 .env 注入 MODELSCOPE_API_KEY
-    ├─ load_config()        读取 config.json（四个配置组）
-    ├─ setup_logging()      logger.py   ← 使用 logging 组：日志级别 + 日志文件
-    ├─ create_client()      api_client.py ← 使用 api 组：base_url / api_key / timeout
-    ├─ ask()                api_client.py ← 使用 api + retry 组：流式请求 + 指数退避重试
-    └─ save_result()        storage.py  ← 使用 storage 组：输出目录 / 格式 / 文件名前缀 / 元信息
+    ├─ load_dotenv()           从 .env 注入密钥（API Token / PG 密码）
+    ├─ load_config()           读取 config.json（五个配置组）
+    ├─ setup_logging()         logger.py        ← logging 组
+    ├─ create_session_store()  session_store.py ← memory 组：Repository 工厂，按 backend 选 SQLite / PostgreSQL
+    │
+    │  每轮对话：
+    ├─ store.add_message()     用户消息先落库
+    ├─ build_context()         context_engine.py ← memory 组：滚动摘要 + token 裁剪，控制上下文成本
+    ├─ ask()                   api_client.py    ← api + retry 组：流式请求 + 指数退避重试
+    ├─ store.add_message()     助手回复落库（请求失败则回滚刚写入的用户消息）
+    └─ save_result()           storage.py       ← storage 组：/save 时结果存文件
 ```
 
 ### 模块说明
 
 | 模块 | 职责 | 对应配置组 |
 |---|---|---|
-| `main.py` | 程序入口：加载环境变量与配置，初始化日志，发起请求，保存结果，异常时记录 ERROR 并以非零码退出 | 全部 |
-| `api_client.py` | 构造 OpenAI 兼容客户端；发送流式 chat 请求并实时打印；用 tenacity 装饰器实现失败重试（`APIError` / `APITimeoutError` / `RateLimitError` / `APIConnectionError`），返回完整的 reasoning + answer 文本 | `api` + `retry` |
-| `storage.py` | 自动创建输出目录，按 `{前缀}_YYYYMMDD_HHMMSS.{格式}` 命名保存结果；JSON 格式包含元信息，`save_metadata=false` 时只存答案 | `storage` |
-| `logger.py` | 一个 `setup_logging()` 函数：按配置初始化 root logger，同时写文件（UTF-8）和控制台 | `logging` |
+| `modelclaw.py` | CLI 入口（typer + Rich）：11 个命令 + 多轮对话 REPL，只做参数解析与流程编排 | 全部 |
+| `api_client.py` | 构造 OpenAI 兼容客户端；`ask()` 流式请求实时打印、`complete()` 非流式（供摘要调用）；共用 tenacity 重试工厂 | `api` + `retry` |
+| `session_store.py` | `SessionStore` 抽象基类（12 个方法即接口契约）+ SQLite 实现 + 后端工厂。契约在此，方言在下层 | `memory` |
+| `postgres_store.py` | PostgreSQL 后端（psycopg 3）：自动建库建表，密码只从 `.env` 读 | `memory` |
+| `context_engine.py` | 上下文工程：tiktoken 计数、滚动摘要压缩、`trim_messages` 裁剪、最新用户消息兜底 | `memory` |
+| `storage.py` | 结果落盘：按 `{前缀}_YYYYMMDD_HHMMSS.{格式}` 命名，JSON 格式可附元信息 | `storage` |
+| `logger.py` | `setup_logging()`：按配置初始化 root logger，同时写文件（UTF-8）和控制台 | `logging` |
+| `main.py` | 最简单的入口示例：一次完整调用流程，供学习对照 | 全部 |
 
 ### 配置流转
 
 ```
 load_config() 读取 config.json
     ↓
-api_client.py   用 api + retry 组 → 发请求、失败重试
-storage.py      用 storage 组     → 存结果文件
-logger.py       用 logging 组     → 写日志
+api_client.py      用 api + retry 组 → 发请求、失败重试
+storage.py         用 storage 组     → 存结果文件
+logger.py          用 logging 组     → 写日志
+session_store.py   用 memory 组      → 会话存取（后端可插拔）
+context_engine.py  用 memory 组      → 裁剪 + 滚动摘要
 ```
 
-四个配置组与三个模块一一对应，职责清晰。字段的详细说明见 [doc/config字段说明.md](doc/config字段说明.md)。
+五个配置组与模块一一对应，职责清晰。字段的详细说明见 [doc/config字段说明.md](doc/config字段说明.md)。
 
 ## 配置说明（速览）
 
@@ -113,6 +128,17 @@ logger.py       用 logging 组     → 写日志
     "logging": {
         "level": "INFO",          // DEBUG / INFO / WARNING / ERROR
         "log_file": "output/app.log"
+    },
+    "memory": {
+        "backend": "sqlite",      // sqlite / postgres，存储后端一键切换
+        "db_path": "output/sessions.db",           // sqlite 后端：数据库文件
+        "postgres": {                               // postgres 后端：连接参数（密码在 .env）
+            "host": "127.0.0.1", "port": 5432,
+            "user": "postgres", "database": "modelclaw"
+        },
+        "max_context_tokens": 4000,     // 上下文 token 硬上限（裁剪）
+        "summary_trigger_tokens": 6000, // 历史超过此值触发滚动摘要
+        "keep_recent_turns": 4          // 摘要时保留最近 N 轮原文
     }
 }
 ```
@@ -133,8 +159,6 @@ modelclaw configure
 # 4. 开始对话
 modelclaw chat "你好"
 ```
-
-> 注意：`requirements.txt` 为 UTF-16 编码，编辑时请保留原编码或统一转为 UTF-8。
 
 ## 运行效果
 
@@ -173,32 +197,25 @@ modelclaw/
 ├── session_store.py       # 会话持久化：SessionStore 抽象基类 + SQLite 实现 + 工厂（Repository 模式）
 ├── postgres_store.py      # PostgreSQL 后端：memory.backend 切换，自动建库建表，密码走 .env
 ├── context_engine.py      # 上下文工程：tiktoken 计数 / trim_messages 裁剪 / 滚动摘要压缩
-├── main.py                # 简单入口示例：一次完整调用流程
-├── api_client.py          # API 请求 + 重试
+├── api_client.py          # API 请求（流式 ask / 非流式 complete）+ 共用重试工厂
 ├── storage.py             # 结果存文件
 ├── logger.py              # 日志初始化
-├── config.json            # 四组运行配置
-├── .env                   # API 密钥（gitignore，不提交）
+├── main.py                # 简单入口示例：一次完整调用流程
+├── config.json            # 五组运行配置
+├── .env                   # 密钥（gitignore，不提交）
 ├── requirements.txt       # 依赖清单（UTF-16 编码）
 ├── doc/
-│   └── config字段说明.md   # 配置字段详细文档
-└── output/                # 运行产物：结果文件 + app.log（gitignore）
+│   ├── config字段说明.md   # 配置字段详细文档
+│   └── M1学习计划.md       # M1 阶段的学习笔记与验收清单
+└── output/                # 运行产物：结果文件 + app.log + sessions.db（gitignore）
 ```
-
-## 安全说明
-
-- **API 密钥只放 `.env`**，`config.json` 的 `api_key` 字段保持为空；`.env` 与 `output/` 均已在 `.gitignore` 中
-- 项目早期版本曾将 ModelScope Token 硬编码提交进 git 历史，该 Token 已视为泄露，**如仍在使用请先到 ModelScope 控制台轮换**
 
 ## 技术栈
 
 - Python 3.12
-- `openai` — OpenAI 兼容客户端（ModelScope / SiliconFlow 等服务通用）
+- `typer` + `rich` — CLI 框架与终端渲染
+- `openai` — OpenAI 兼容客户端
 - `tenacity` — 重试与指数退避
+- `langchain-core` + `tiktoken` — 上下文裁剪（trim_messages）与 token 计数
+- `psycopg` — PostgreSQL 存储后端（可选）
 - `python-dotenv` — `.env` 环境变量注入
-
-## 后续规划
-
-- 支持指定保存格式（`--format md`）
-- 多轮对话历史持久化与恢复
-- 引入 pytest 测试套件
