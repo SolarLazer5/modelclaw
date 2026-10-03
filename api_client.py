@@ -118,3 +118,28 @@ def complete(client: OpenAI, cfg: dict, messages: list) -> str:
 
     logger.info("Sending non-streaming request: model=%s", api_cfg["model"])
     return _complete_once()
+
+
+def ask_with_tools(client: OpenAI, cfg: dict, messages: list, tool_schemas: list) -> object:
+    """Non-streaming call with tool schemas; returns the raw ChatCompletionMessage.
+
+    The agent loop inspects `msg.tool_calls` (model wants to act) vs
+    `msg.content` (model has a final answer). DeepSeek's reasoning_content
+    rides along as a message attribute when the server provides it.
+    """
+    api_cfg = cfg["api"]
+
+    @_retry_decorator(cfg.get("retry", {}))
+    def _once():
+        return client.chat.completions.create(
+            model=api_cfg["model"],
+            messages=messages,
+            tools=tool_schemas or None,
+            tool_choice="auto",
+            temperature=api_cfg.get("temperature", 0.7),
+            max_tokens=api_cfg.get("max_tokens", 2048),
+            stream=False,
+        ).choices[0].message
+
+    logger.info("Sending agent request: model=%s, tools=%d", api_cfg["model"], len(tool_schemas))
+    return _once()

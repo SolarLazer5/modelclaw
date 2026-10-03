@@ -29,8 +29,18 @@
             "database": "modelclaw"
         },
         "max_context_tokens": 4000,
-        "summary_trigger_tokens": 6000,
+        "summary_trigger_tokens": 3000,
         "keep_recent_turns": 4
+    },
+    "agent": {
+        "max_iterations": 8,
+        "enabled_tools": [
+            "calculator",
+            "get_current_time",
+            "read_local_file",
+            "web_search",
+            "get_weather"
+        ]
     },
     "logging": {
         "level": "INFO",

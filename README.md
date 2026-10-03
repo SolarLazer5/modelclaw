@@ -7,6 +7,7 @@
 - **流式对话输出**：实时打印模型回复，思考过程（`reasoning_content`，`=== Thinking ===`）与最终答案（`=== Final Answer ===`）分开展示
 - **会话记忆**：多轮对话自动持久化（SQLite / PostgreSQL 双后端），退出不丢；`chat --resume` 恢复历史会话
 - **上下文工程**：每次请求前自动执行「滚动摘要压缩 → token 裁剪」流水线
+- **Agent 工具调用**：`agent` 命令下模型自主调用工具（计算器 / 本地文件 / 联网搜索 / 当前时间），手写 tool_calls 循环，调用过程全程可视；带 eval 白名单、路径沙箱、迭代上限三层安全边界
 - **可插拔存储层**：修改memory.backend配置切换 SQLite ↔ PostgreSQL
 - **异常重试**：基于 [tenacity](https://github.com/jd/tenacity) 的指数退避重试，覆盖超时、限流（429）、连接错误等可恢复异常
 - **结果存文件**：对话结果自动保存到 `output/` 目录，文件名带时间戳防覆盖（如 `result_20260916_171114.json`）；支持 `json` / `md` / `txt` 三种格式，附带 prompt、模型名、时间戳、思考过程等元信息
@@ -31,6 +32,10 @@ modelclaw chat "写代码" --temperature 0.2 --no-save   # 临时覆盖参数 / 
 
 modelclaw sessions     # 列出所有历史会话（ID / 标题 / 轮数 / 更新时间），--delete <片段> 删除
 
+modelclaw agent "计算 300 的 25% 再加 17"        # Agent：模型自主调用计算器
+modelclaw agent "读 config.json 告诉我模型名"      # Agent：模型自主读文件
+modelclaw agent                                    # Agent 多轮模式（/tools 查看可用工具）
+
 modelclaw config      # 查看当前生效配置（API 密钥打码显示）
 modelclaw models      # 列出当前 API 可用的模型
 modelclaw ping        # 连通性 + 认证测试，报告延迟
@@ -46,6 +51,7 @@ modelclaw clean -y    # 清理结果文件；--logs 连日志一起删；--sessi
 |---|---|
 | `configure` | 设置 `base_url` / `model`（写入 `config.json`）和 `api_key`（写入 `.env`），交互式或用参数非交互 |
 | `chat`（别名 `send`） | 发送消息：带消息=单轮；不带=多轮对话。支持 `--system` / `--model` / `--temperature` / `--no-save` / `--session` / `--resume` |
+| `agent` | Agent 模式：模型自主调用工具完成任务，支持 `--session` / `--resume`；REPL 内 `/tools` 查看工具 |
 | `sessions` | 列出历史会话；`--delete <片段>` 删除指定会话 |
 | `config` | 打印当前生效配置，密钥打码 |
 | `models` | 调用 API 列出可用模型 ID |
@@ -78,11 +84,13 @@ modelclaw chat
 
 | 模块 | 职责 | 对应配置组 |
 |---|---|---|
-| `modelclaw.py` | CLI 入口（typer + Rich）：11 个命令 + 多轮对话 REPL，只做参数解析与流程编排 | 全部 |
+| `modelclaw.py` | CLI 入口（typer + Rich）：12 个命令 + 多轮对话 REPL，只做参数解析与流程编排 | 全部 |
 | `api_client.py` | 构造 OpenAI 兼容客户端；`ask()` 流式请求实时打印、`complete()` 非流式（供摘要调用）；共用 tenacity 重试工厂 | `api` + `retry` |
 | `session_store.py` | `SessionStore` 抽象基类（12 个方法即接口契约）+ SQLite 实现 + 后端工厂。契约在此，方言在下层 | `memory` |
 | `postgres_store.py` | PostgreSQL 后端（psycopg 3）：自动建库建表，密码只从 `.env` 读 | `memory` |
 | `context_engine.py` | 上下文工程：tiktoken 计数、滚动摘要压缩、`trim_messages` 裁剪、最新用户消息兜底 | `memory` |
+| `agent.py` | Agent 循环（手写 tool_calls 协议）：模型要行动就执行工具回灌结果，给出最终答案则落库返回；迭代上限防死循环 | `agent` + `memory` |
+| `tools.py` | 工具注册表：JSON Schema（模型读的说明书）+ 执行函数；eval 白名单 / 路径沙箱 / 超时截断 | `agent` |
 | `storage.py` | 结果落盘：按 `{前缀}_YYYYMMDD_HHMMSS.{格式}` 命名，JSON 格式可附元信息 | `storage` |
 | `logger.py` | `setup_logging()`：按配置初始化 root logger，同时写文件（UTF-8）和控制台 | `logging` |
 | `main.py` | 最简单的入口示例：一次完整调用流程，供学习对照 | 全部 |
@@ -97,9 +105,10 @@ storage.py         用 storage 组     → 存结果文件
 logger.py          用 logging 组     → 写日志
 session_store.py   用 memory 组      → 会话存取（后端可插拔）
 context_engine.py  用 memory 组      → 裁剪 + 滚动摘要
+agent.py + tools.py 用 agent 组      → 工具集 + 迭代上限
 ```
 
-五个配置组与模块一一对应，职责清晰。字段的详细说明见 [doc/config字段说明.md](doc/config字段说明.md)。
+六个配置组与模块一一对应，职责清晰。字段的详细说明见 [doc/config字段说明.md](doc/config字段说明.md)。
 
 ## 配置说明（速览）
 
@@ -137,8 +146,12 @@ context_engine.py  用 memory 组      → 裁剪 + 滚动摘要
             "user": "postgres", "database": "modelclaw"
         },
         "max_context_tokens": 4000,     // 上下文 token 硬上限（裁剪）
-        "summary_trigger_tokens": 6000, // 历史超过此值触发滚动摘要
+        "summary_trigger_tokens": 3000, // 历史超过此值触发滚动摘要
         "keep_recent_turns": 4          // 摘要时保留最近 N 轮原文
+    },
+    "agent": {
+        "max_iterations": 8,            // Agent 循环迭代上限（防死循环）
+        "enabled_tools": ["calculator", "get_current_time", "read_local_file", "web_search"]
     }
 }
 ```
@@ -197,16 +210,19 @@ modelclaw/
 ├── session_store.py       # 会话持久化：SessionStore 抽象基类 + SQLite 实现 + 工厂（Repository 模式）
 ├── postgres_store.py      # PostgreSQL 后端：memory.backend 切换，自动建库建表，密码走 .env
 ├── context_engine.py      # 上下文工程：tiktoken 计数 / trim_messages 裁剪 / 滚动摘要压缩
-├── api_client.py          # API 请求（流式 ask / 非流式 complete）+ 共用重试工厂
+├── agent.py               # Agent 循环：tool_calls → 工具执行 → 结果回灌，直至最终答案
+├── tools.py               # 工具注册表：calculator / get_current_time / read_local_file / web_search
+├── api_client.py          # API 请求（流式 ask / 非流式 complete / 带工具 ask_with_tools）+ 共用重试工厂
 ├── storage.py             # 结果存文件
 ├── logger.py              # 日志初始化
 ├── main.py                # 简单入口示例：一次完整调用流程
-├── config.json            # 五组运行配置
+├── config.json            # 六组运行配置
 ├── .env                   # 密钥（gitignore，不提交）
 ├── requirements.txt       # 依赖清单（UTF-16 编码）
 ├── doc/
 │   ├── config字段说明.md   # 配置字段详细文档
-│   └── M1学习计划.md       # M1 阶段的学习笔记与验收清单
+│   ├── M1学习计划.md       # M1 阶段学习笔记与验收清单
+│   └── M2学习计划.md       # M2 阶段（Agent）学习笔记与验收清单
 └── output/                # 运行产物：结果文件 + app.log + sessions.db（gitignore）
 ```
 
@@ -218,4 +234,5 @@ modelclaw/
 - `tenacity` — 重试与指数退避
 - `langchain-core` + `tiktoken` — 上下文裁剪（trim_messages）与 token 计数
 - `psycopg` — PostgreSQL 存储后端（可选）
+- `ddgs` — DuckDuckGo 联网搜索（Agent 的 web_search 工具，免 API key）
 - `python-dotenv` — `.env` 环境变量注入

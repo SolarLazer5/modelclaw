@@ -6,3 +6,4 @@ output/
 .vscode/
 AGENTS.md
 temp/
+test.py

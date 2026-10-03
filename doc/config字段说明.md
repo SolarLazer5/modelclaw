@@ -60,7 +60,16 @@
 | `summary_trigger_tokens` | 摘要触发阈值 | 历史超过这个 token 数时，自动把最老的几轮交给 LLM 压成「滚动摘要」存进库，原始消息删除。调小可观察摘要触发，调大则少用摘要省 token |
 | `keep_recent_turns` | 摘要保留轮数 | 触发摘要时，最近 N 轮对话保留原文不压缩（保证近期上下文精确），更早的才进摘要 |
 
-## 六、配置在代码中的流转
+## 六、agent —— Agent 工具调用配置
+
+Agent 模式（`modelclaw agent`）的行为边界，对应 `agent.py` + `tools.py`。
+
+| 字段 | 作用 | 说明 |
+|---|---|---|
+| `max_iterations` | 迭代上限 | Agent 是「模型驱动的循环」，这是唯一的止损线：超过这个轮数还没给出最终答案就报错退出，防模型陷入死循环烧光额度。8 轮对绝大多数任务够用 |
+| `enabled_tools` | 启用的工具集 | 数组里是 `tools.py` 注册表中的工具名。删掉某项即禁用（比如不想开放联网就去掉 `web_search`）；在 `tools.py` 里新增工具后，要在这里登记才会生效 |
+
+## 七、配置在代码中的流转
 
 ```
 load_config() 读取
@@ -68,13 +77,14 @@ load_config() 读取
 api_client.py      用 api + retry 组 → 发请求、失败重试
 storage.py         用 storage 组    → 存结果文件
 logger.py          用 logging 组    → 写日志
-session_store.py   用 memory 组     → SQLite 会话存取
+session_store.py   用 memory 组     → 会话存取（SQLite / PostgreSQL 双后端）
 context_engine.py  用 memory 组     → 裁剪 + 滚动摘要
+agent.py + tools.py 用 agent 组     → 工具集 + 迭代上限
 ```
 
-五个配置组正好对应五个模块，职责清晰。每个字段将来都可以在不改代码的情况下调整——这就是配置化的意义：调参是改文件的事，不是改逻辑的事。
+六个配置组正好对应六个模块，职责清晰。每个字段将来都可以在不改代码的情况下调整——这就是配置化的意义：调参是改文件的事，不是改逻辑的事。
 
-## 七、使用备忘
+## 八、使用备忘
 
 - JSON 不支持注释，想给字段写备忘，可用 `"_说明_xxx": "内容"` 形式，代码读取时忽略
 - JSON 不允许尾随逗号，最后一个字段后面不能多逗号

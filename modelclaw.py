@@ -33,12 +33,14 @@ from rich.prompt import Confirm, Prompt
 from rich.syntax import Syntax
 from rich.table import Table
 
+from agent import run_agent
 from api_client import ask, create_client
 from context_engine import build_context, count_tokens
 from logger import setup_logging
 from main import load_config
 from session_store import SessionStore, create_session_store
 from storage import save_result
+from tools import TOOLS
 
 __version__ = "0.4.0"
 
@@ -178,7 +180,7 @@ def chat(
     session: Annotated[Optional[str], typer.Option("--session", help="使用指定 ID 的会话（不存在则创建）")] = None,
     resume: Annotated[Optional[str], typer.Option("--resume", "-r", help="恢复历史会话（ID 或片段）")] = None,
 ) -> None:
-    """发送消息；不带消息则进入多轮对话 REPL（会话自动持久化到 SQLite）"""
+    """发送消息；不带消息则进入多轮对话 REPL（会话自动持久化，后端可插拔）"""
     cfg = apply_overrides(load_config(CONFIG_PATH), model, temperature)
     setup_logging(cfg)
     client = create_client(cfg)
@@ -272,6 +274,107 @@ def _chat_repl(client, cfg: dict, store: SessionStore, session_id: str, system: 
 
 # chat 的别名：modelclaw send
 app.command("send", help="chat 的别名")(chat)
+
+
+@app.command()
+def agent(
+    task: Annotated[Optional[str], typer.Argument(help="要完成的任务；不提供则进入 Agent 多轮模式")] = None,
+    system: Annotated[Optional[str], typer.Option("--system", "-s", help="system prompt")] = None,
+    model: Annotated[Optional[str], typer.Option("--model", "-m", help="临时覆盖模型名")] = None,
+    temperature: Annotated[Optional[float], typer.Option("--temperature", "-t", help="临时覆盖 temperature")] = None,
+    session: Annotated[Optional[str], typer.Option("--session", help="使用指定 ID 的会话（不存在则创建）")] = None,
+    resume: Annotated[Optional[str], typer.Option("--resume", "-r", help="恢复历史会话（ID 或片段）")] = None,
+) -> None:
+    """Agent 模式：模型自主决策调用工具（计算器/文件/搜索/时间）完成任务"""
+    cfg = apply_overrides(load_config(CONFIG_PATH), model, temperature)
+    setup_logging(cfg)
+    client = create_client(cfg)
+    store = create_session_store(cfg)
+
+    if resume:
+        try:
+            session_id = store.find_session(resume)
+        except FileNotFoundError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+    else:
+        session_id = store.create_session(session)
+
+    if task:
+        try:
+            run_agent(client, cfg, store, session_id, task, system)
+        except Exception as exc:
+            logger.error("Agent failed: %s", exc)
+            err_console.print(f"\n[red]× Agent 执行失败: {exc}[/red]")
+            raise typer.Exit(1)
+        return
+
+    _agent_repl(client, cfg, store, session_id, system)
+
+
+def _agent_repl(client, cfg: dict, store: SessionStore, session_id: str, system: Optional[str]) -> None:
+    console.print(Panel.fit(
+        f"Agent 模式 · 模型: [bold]{cfg['api']['model']}[/bold] · 会话: [bold]{session_id}[/bold]\n"
+        "[dim]/tools 查看可用工具 · /save 保存上一轮结果 · /clear 清空上下文 · /session 会话信息 · /exit 退出[/dim]",
+        border_style="yellow",
+    ))
+
+    last = None  # (task, result) of the latest agent run
+
+    while True:
+        try:
+            user_input = console.input("[bold yellow]agent>[/bold yellow] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]bye.[/dim]")
+            return
+        if not user_input:
+            continue
+        if user_input in ("/exit", "/quit"):
+            console.print("[dim]bye.[/dim]")
+            return
+        if user_input == "/tools":
+            enabled = cfg.get("agent", {}).get("enabled_tools", [])
+            table = Table(title="当前启用的工具", header_style="bold yellow")
+            table.add_column("工具", style="bold")
+            table.add_column("用途（模型读到的 description）")
+            for name in enabled:
+                if name in TOOLS:
+                    table.add_row(name, TOOLS[name]["schema"]["function"]["description"])
+            console.print(table)
+            continue
+        if user_input == "/clear":
+            store.clear_session(session_id)
+            last = None
+            console.print("[dim](上下文已清空)[/dim]")
+            continue
+        if user_input == "/session":
+            msgs = store.get_messages(session_id)
+            summary = store.get_summary(session_id)
+            console.print(
+                f"[dim]会话 {session_id} · 消息 {len(msgs)} 条（约 {count_tokens(msgs)} tokens）"
+                + (f" · 滚动摘要约 {count_tokens(summary)} tokens" if summary else "")
+                + "[/dim]"
+            )
+            continue
+        if user_input == "/save":
+            if last:
+                path = save_result(cfg, last[0], last[1])
+                console.print(f"[dim](已保存到 {path})[/dim]")
+            else:
+                console.print("[dim](还没有可保存的对话)[/dim]")
+            continue
+        if user_input == "/help":
+            console.print("[dim]/tools 工具列表 · /save 保存上一轮结果 · /clear 清空上下文 · /session 会话信息 · /exit 退出[/dim]")
+            continue
+
+        try:
+            result = run_agent(client, cfg, store, session_id, user_input, system)
+        except Exception as exc:
+            logger.error("Agent failed: %s", exc)
+            err_console.print(f"[red]× Agent 执行失败: {exc}[/red]")
+            continue
+        last = (user_input, result)
+        print()
 
 
 @app.command()
