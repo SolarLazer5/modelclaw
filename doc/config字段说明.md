@@ -1,7 +1,7 @@
 # config.json 字段说明
 
 > 项目：python-model-cli · 配置文件字段速查
-> 配置文件由四个分组构成，分别对应代码中的不同模块。
+> 配置文件由七个分组构成，分别对应代码中的不同模块。
 
 ## 一、api —— API 连接配置
 
@@ -69,7 +69,23 @@ Agent 模式（`modelclaw agent`）的行为边界，对应 `agent.py` + `tools.
 | `max_iterations` | 迭代上限 | Agent 是「模型驱动的循环」，这是唯一的止损线：超过这个轮数还没给出最终答案就报错退出，防模型陷入死循环烧光额度。8 轮对绝大多数任务够用 |
 | `enabled_tools` | 启用的工具集 | 数组里是 `tools.py` 注册表中的工具名。删掉某项即禁用（比如不想开放联网就去掉 `web_search`）；在 `tools.py` 里新增工具后，要在这里登记才会生效 |
 
-## 七、配置在代码中的流转
+## 七、rag —— 知识库问答配置
+
+RAG（检索增强生成）管线，对应 `embeddings.py` / `rag_store.py` / `rag.py`。
+
+| 字段 | 作用 | 说明 |
+|---|---|---|
+| `backend` | 向量库后端 | `pgvector`（默认，存在 PG 的 modelclaw 库）或 `sqlite-vec`（零配置本地文件）。切换后 `docs`/`ask` 行为一致 |
+| `db_path` | sqlite-vec 库文件 | 仅 sqlite-vec 后端使用。向量是「派生数据」，删了重跑 `ingest` 即可重建 |
+| `embedding_model` | 嵌入模型 | 默认 `Qwen/Qwen3-Embedding-0.6B`（1024 维）。**维度不用手配**——建库时从模型输出自动学习，换模型后若与已有库维度不符会提示 `--clear` 重建 |
+| `embedding_source` | 模型来源 | `dashscope`（云端 API，零本地算力，默认）/ `modelscope`（本地缓存）/ `huggingface`（本地镜像） |
+| `dashscope_url` | 云端嵌入端点 | 仅 dashscope 源使用；密钥走 `.env` 的 `DASHSCOPE_API_KEY` |
+| `query_instruction` | 查询指令前缀 | 部分嵌入模型（如 Qwen3 系列）支持给查询加指令提升检索效果；实测提升不大则留空 |
+| `chunk_size` / `chunk_overlap` | 切分参数 | 块大小与重叠。块太大检索不精确，太小语义不完整；500/50 是通用起点 |
+| `top_k` | 回答用的块数 | 重排后取前 k 块拼进提示词。不是越大越好——无关块会稀释答案 |
+| `reranker_model` | 重排模型 | cross-encoder，把问题和候选块拼起来精读打分。检索质量的关键保险丝 |
+
+## 八、配置在代码中的流转
 
 ```
 load_config() 读取
@@ -80,11 +96,12 @@ logger.py          用 logging 组    → 写日志
 session_store.py   用 memory 组     → 会话存取（SQLite / PostgreSQL 双后端）
 context_engine.py  用 memory 组     → 裁剪 + 滚动摘要
 agent.py + tools.py 用 agent 组     → 工具集 + 迭代上限
+embeddings/rag_store/rag.py 用 rag 组 → 嵌入 / 切分 / 检索 / 重排
 ```
 
-六个配置组正好对应六个模块，职责清晰。每个字段将来都可以在不改代码的情况下调整——这就是配置化的意义：调参是改文件的事，不是改逻辑的事。
+七个配置组正好对应各模块，职责清晰。每个字段将来都可以在不改代码的情况下调整——这就是配置化的意义：调参是改文件的事，不是改逻辑的事。
 
-## 八、使用备忘
+## 九、使用备忘
 
 - JSON 不支持注释，想给字段写备忘，可用 `"_说明_xxx": "内容"` 形式，代码读取时忽略
 - JSON 不允许尾随逗号，最后一个字段后面不能多逗号

@@ -8,6 +8,7 @@
 - **会话记忆**：多轮对话自动持久化（SQLite / PostgreSQL 双后端），退出不丢；`chat --resume` 恢复历史会话
 - **上下文工程**：每次请求前自动执行「滚动摘要压缩 → token 裁剪」流水线
 - **Agent 工具调用**：`agent` 命令下模型自主调用工具（计算器 / 本地文件 / 联网搜索 / 当前时间），手写 tool_calls 循环，调用过程全程可视；带 eval 白名单、路径沙箱、迭代上限三层安全边界
+- **RAG 知识库问答**：`ingest` 灌文档（切分→嵌入→向量库），`ask` 检索增强回答并附引用来源；嵌入走 DashScope 云端 API（零本地算力），向量库默认 pgvector（可切 sqlite-vec），检索用「向量+BM25 混合召回 + cross-encoder 重排」三级管线，相关度不足时零成本拒答
 - **可插拔存储层**：修改memory.backend配置切换 SQLite ↔ PostgreSQL
 - **异常重试**：基于 [tenacity](https://github.com/jd/tenacity) 的指数退避重试，覆盖超时、限流（429）、连接错误等可恢复异常
 - **结果存文件**：对话结果自动保存到 `output/` 目录，文件名带时间戳防覆盖（如 `result_20260916_171114.json`）；支持 `json` / `md` / `txt` 三种格式，附带 prompt、模型名、时间戳、思考过程等元信息
@@ -36,6 +37,10 @@ modelclaw agent "计算 300 的 25% 再加 17"        # Agent：模型自主调�
 modelclaw agent "读 config.json 告诉我模型名"      # Agent：模型自主读文件
 modelclaw agent                                    # Agent 多轮模式（/tools 查看可用工具）
 
+modelclaw ingest ./doc                          # 把文档灌入 RAG 知识库（.md/.txt/.py）
+modelclaw ask "retry 组有哪些字段？"             # RAG 问答：检索+重排后回答，附引用来源
+modelclaw docs                                    # 查看知识库来源；--delete 删来源，--clear 清空
+
 modelclaw config      # 查看当前生效配置（API 密钥打码显示）
 modelclaw models      # 列出当前 API 可用的模型
 modelclaw ping        # 连通性 + 认证测试，报告延迟
@@ -52,6 +57,9 @@ modelclaw clean -y    # 清理结果文件；--logs 连日志一起删；--sessi
 | `configure` | 设置 `base_url` / `model`（写入 `config.json`）和 `api_key`（写入 `.env`），交互式或用参数非交互 |
 | `chat`（别名 `send`） | 发送消息：带消息=单轮；不带=多轮对话。支持 `--system` / `--model` / `--temperature` / `--no-save` / `--session` / `--resume` |
 | `agent` | Agent 模式：模型自主调用工具完成任务，支持 `--session` / `--resume`；REPL 内 `/tools` 查看工具 |
+| `ingest` | 灌入文档到 RAG 知识库，`--force` 重灌已有来源 |
+| `ask` | RAG 知识库问答，`--k` 覆盖检索块数；相关度不足直接拒答 |
+| `docs` | 知识库来源列表；`--delete` 删来源、`--clear` 清空 |
 | `sessions` | 列出历史会话；`--delete <片段>` 删除指定会话 |
 | `config` | 打印当前生效配置，密钥打码 |
 | `models` | 调用 API 列出可用模型 ID |
@@ -91,6 +99,10 @@ modelclaw chat
 | `context_engine.py` | 上下文工程：tiktoken 计数、滚动摘要压缩、`trim_messages` 裁剪、最新用户消息兜底 | `memory` |
 | `agent.py` | Agent 循环（手写 tool_calls 协议）：模型要行动就执行工具回灌结果，给出最终答案则落库返回；迭代上限防死循环 | `agent` + `memory` |
 | `tools.py` | 工具注册表：JSON Schema（模型读的说明书）+ 执行函数；eval 白名单 / 路径沙箱 / 超时截断 | `agent` |
+| `embeddings.py` | 嵌入与重排封装：供应商可插拔（modelscope/huggingface），维度运行时推导不硬编码；reranker 为 bge-reranker-base | `rag` |
+| `rag_store.py` | `RagStore` 抽象基类 + `SqliteVecStore`（sqlite-vec 默认后端）+ 工厂；维度记入 rag_meta，不匹配时友好报错 | `rag` |
+| `pgvector_store.py` | pgvector 后端：`rag_chunks` 单表（embedding vector(N) 列），`<=>` 余弦距离 KNN；连接复用 memory.postgres | `rag` + `memory` |
+| `rag.py` | RAG 管线：ingest（切分/嵌入/入库）、混合检索（向量+BM25+RRF）、rerank、stuff 式问答 + 引用 | `rag` |
 | `storage.py` | 结果落盘：按 `{前缀}_YYYYMMDD_HHMMSS.{格式}` 命名，JSON 格式可附元信息 | `storage` |
 | `logger.py` | `setup_logging()`：按配置初始化 root logger，同时写文件（UTF-8）和控制台 | `logging` |
 | `main.py` | 最简单的入口示例：一次完整调用流程，供学习对照 | 全部 |
@@ -106,9 +118,10 @@ logger.py          用 logging 组     → 写日志
 session_store.py   用 memory 组      → 会话存取（后端可插拔）
 context_engine.py  用 memory 组      → 裁剪 + 滚动摘要
 agent.py + tools.py 用 agent 组      → 工具集 + 迭代上限
+rag.py 等           用 rag 组        → 嵌入模型 / 切分参数 / 检索块数
 ```
 
-六个配置组与模块一一对应，职责清晰。字段的详细说明见 [doc/config字段说明.md](doc/config字段说明.md)。
+七个配置组与模块一一对应，职责清晰。字段的详细说明见 [doc/config字段说明.md](doc/config字段说明.md)。
 
 ## 配置说明（速览）
 
@@ -152,6 +165,16 @@ agent.py + tools.py 用 agent 组      → 工具集 + 迭代上限
     "agent": {
         "max_iterations": 8,            // Agent 循环迭代上限（防死循环）
         "enabled_tools": ["calculator", "get_current_time", "read_local_file", "web_search"]
+    },
+    "rag": {
+        "backend": "pgvector",      // pgvector / sqlite-vec，向量库一键切换
+        "db_path": "output/rag.db",    // sqlite-vec 后端：向量库文件
+        "embedding_model": "Qwen/Qwen3-Embedding-0.6B",  // 嵌入模型（1024 维，维度自动识别）
+        "embedding_source": "modelscope",              // modelscope / huggingface
+        "query_instruction": "",      // 查询指令前缀（Qwen3 系列可选，实测提升不大则留空）
+        "chunk_size": 500, "chunk_overlap": 50,       // 切分参数
+        "top_k": 4,                     // 最终送入模型的块数
+        "reranker_model": "BAAI/bge-reranker-base"    // 重排模型（cross-encoder）
     }
 }
 ```
@@ -212,6 +235,10 @@ modelclaw/
 ├── context_engine.py      # 上下文工程：tiktoken 计数 / trim_messages 裁剪 / 滚动摘要压缩
 ├── agent.py               # Agent 循环：tool_calls → 工具执行 → 结果回灌，直至最终答案
 ├── tools.py               # 工具注册表：calculator / get_current_time / read_local_file / web_search
+├── embeddings.py          # 嵌入（Qwen3-Embedding / bge）+ 重排（bge-reranker-base），供应商可插拔
+├── rag_store.py           # RagStore 抽象基类 + sqlite-vec 后端 + 工厂
+├── pgvector_store.py      # pgvector 后端：vector(N) 列 + <=> 余弦 KNN
+├── rag.py                 # RAG 管线：ingest / 混合检索（向量+BM25+RRF）/ rerank / 问答
 ├── api_client.py          # API 请求（流式 ask / 非流式 complete / 带工具 ask_with_tools）+ 共用重试工厂
 ├── storage.py             # 结果存文件
 ├── logger.py              # 日志初始化
@@ -222,7 +249,8 @@ modelclaw/
 ├── doc/
 │   ├── config字段说明.md   # 配置字段详细文档
 │   ├── M1学习计划.md       # M1 阶段学习笔记与验收清单
-│   └── M2学习计划.md       # M2 阶段（Agent）学习笔记与验收清单
+│   ├── M2学习计划.md       # M2 阶段（Agent）学习笔记与验收清单
+│   └── M3学习计划.md       # M3 阶段（RAG）学习笔记与验收清单
 └── output/                # 运行产物：结果文件 + app.log + sessions.db（gitignore）
 ```
 
@@ -235,4 +263,6 @@ modelclaw/
 - `langchain-core` + `tiktoken` — 上下文裁剪（trim_messages）与 token 计数
 - `psycopg` — PostgreSQL 存储后端（可选）
 - `ddgs` — DuckDuckGo 联网搜索（Agent 的 web_search 工具，免 API key）
+- `sentence-transformers` + `modelscope` — 嵌入与重排模型（Qwen3-Embedding / bge-reranker）
+- `sqlite-vec` + `rank_bm25` — 本地向量库与关键词检索（混合召回）；pgvector 走 PG 扩展
 - `python-dotenv` — `.env` 环境变量注入

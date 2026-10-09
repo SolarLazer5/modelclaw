@@ -42,6 +42,18 @@
             "get_weather"
         ]
     },
+    "rag": {
+        "backend": "pgvector",
+        "db_path": "output/rag.db",
+        "embedding_model": "qwen3.7-text-embedding",
+        "embedding_source": "dashscope",
+        "dashscope_url": "https://llm-gd0zjpwlkp8emiz4.cn-beijing.maas.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding",
+        "query_instruction": "",
+        "chunk_size": 500,
+        "chunk_overlap": 50,
+        "top_k": 6,
+        "reranker_model": "BAAI/bge-reranker-base"
+    },
     "logging": {
         "level": "INFO",
         "log_file": "output/app.log"

@@ -8,6 +8,9 @@ Usage:
     modelclaw chat                   # interactive multi-turn session
     modelclaw chat --resume <id>     # resume a persisted session
     modelclaw sessions               # list / delete chat sessions
+    modelclaw ingest ./docs          # feed documents into the RAG knowledge base
+    modelclaw ask "..."              # RAG question answering with citations
+    modelclaw docs                   # list / delete ingested sources
     modelclaw config                 # show current effective config
     modelclaw models                 # list available models
     modelclaw ping                   # connectivity test
@@ -38,6 +41,7 @@ from api_client import ask, create_client
 from context_engine import build_context, count_tokens
 from logger import setup_logging
 from main import load_config
+from rag import answer_with_rag, create_rag_store, ingest_path, render_sources
 from session_store import SessionStore, create_session_store
 from storage import save_result
 from tools import TOOLS
@@ -274,6 +278,85 @@ def _chat_repl(client, cfg: dict, store: SessionStore, session_id: str, system: 
 
 # chat 的别名：modelclaw send
 app.command("send", help="chat 的别名")(chat)
+
+
+@app.command()
+def ingest(
+    path: Annotated[str, typer.Argument(help="文件或目录路径（支持 .md / .txt / .py）")],
+    force: Annotated[bool, typer.Option("--force", "-f", help="已入库的来源强制重灌")] = False,
+) -> None:
+    """把文档灌入 RAG 知识库（切分 → 本地嵌入 → 向量库）"""
+    cfg = load_config(CONFIG_PATH)
+    setup_logging(cfg)
+    try:
+        total = ingest_path(cfg, path, force)
+    except FileNotFoundError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    if total:
+        console.print(f"\n[green]√ 共入库 {total} 个文本块[/green]")
+
+
+@app.command(name="ask")
+def ask_kb(
+    question: Annotated[str, typer.Argument(help="要问知识库的问题")],
+    k: Annotated[Optional[int], typer.Option("--k", help="检索块数（覆盖 rag.top_k）")] = None,
+) -> None:
+    """RAG 知识库问答：检索相关文档片段后回答，附引用来源"""
+    cfg = load_config(CONFIG_PATH)
+    setup_logging(cfg)
+    client = create_client(cfg)
+    try:
+        out = answer_with_rag(client, cfg, question, k)
+    except Exception as exc:
+        logger.error("RAG ask failed: %s", exc)
+        err_console.print(f"[red]× 问答失败: {exc}[/red]")
+        raise typer.Exit(1)
+    if out["sources"]:
+        render_sources(out["sources"])
+
+
+@app.command()
+def docs(
+    delete: Annotated[Optional[str], typer.Option("--delete", "-d", help="删除指定来源（完整路径）")] = None,
+    clear: Annotated[bool, typer.Option("--clear", help="清空整个知识库")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="清空时跳过确认")] = False,
+) -> None:
+    """查看 RAG 知识库中已入库的文档来源"""
+    cfg = load_config(CONFIG_PATH)
+    store = create_rag_store(cfg)
+
+    if clear:
+        n = store.count_chunks()
+        if not n:
+            console.print("[dim](知识库本来就是空的)[/dim]")
+            return
+        if not yes and not Confirm.ask(f"确认清空知识库（{n} 个文本块）？", default=False):
+            console.print("[dim]已取消[/dim]")
+            return
+        store.clear()
+        console.print(f"[green]√ 已清空知识库（{n} 个文本块）[/green]")
+        return
+
+    if delete:
+        n = store.delete_source(delete)
+        if n:
+            console.print(f"[green]√ 已删除 {delete}（{n} 个文本块）[/green]")
+        else:
+            err_console.print(f"[red]找不到来源: {delete}（用 modelclaw docs 查看完整来源名）[/red]")
+            raise typer.Exit(1)
+        return
+
+    rows = store.list_sources()
+    if not rows:
+        console.print("[dim](知识库为空，先 modelclaw ingest <路径> 灌入文档)[/dim]")
+        return
+    table = Table(title=f"知识库文档（共 {store.count_chunks()} 块）", header_style="bold magenta")
+    table.add_column("来源", style="bold")
+    table.add_column("块数", justify="right")
+    for r in rows:
+        table.add_row(r["source"], str(r["chunks"]))
+    console.print(table)
 
 
 @app.command()
