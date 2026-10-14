@@ -97,9 +97,26 @@ class PgVectorStore(RagStore):
             raise RuntimeError(
                 "未找到 MODELCLAW_PG_PASSWORD，请在 .env 文件中配置 PostgreSQL 密码"
             )
+        self._ensure_database()
         with self._connect() as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
             conn.execute(_SCHEMA_META)
+
+    def _ensure_database(self) -> None:
+        """Create the database if missing (PG has no CREATE DATABASE IF NOT EXISTS;
+        DDL runs from the maintenance db in autocommit mode)."""
+        conn = psycopg.connect(
+            host=self.host, port=self.port, user=self.user,
+            password=self.password, dbname="postgres", autocommit=True,
+        )
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s", (self.dbname,)
+            ).fetchone()
+            if not exists:
+                conn.execute(f'CREATE DATABASE "{self.dbname}"')
+        finally:
+            conn.close()
 
     def _connect(self) -> psycopg.Connection:
         """

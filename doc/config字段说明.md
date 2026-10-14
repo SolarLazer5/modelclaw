@@ -66,6 +66,7 @@ Agent 模式（`modelclaw agent`）的行为边界，对应 `agent.py` + `tools.
 
 | 字段 | 作用 | 说明 |
 |---|---|---|
+| `engine` | Agent 引擎 | `native`（默认，手写 tool_calls 循环，M2 的参照实现）或 `langgraph`（create_react_agent + PostgresSaver，记忆由检查点托管到 PG） |
 | `max_iterations` | 迭代上限 | Agent 是「模型驱动的循环」，这是唯一的止损线：超过这个轮数还没给出最终答案就报错退出，防模型陷入死循环烧光额度。8 轮对绝大多数任务够用 |
 | `enabled_tools` | 启用的工具集 | 数组里是 `tools.py` 注册表中的工具名。删掉某项即禁用（比如不想开放联网就去掉 `web_search`）；在 `tools.py` 里新增工具后，要在这里登记才会生效 |
 
@@ -85,7 +86,13 @@ RAG（检索增强生成）管线，对应 `embeddings.py` / `rag_store.py` / `r
 | `top_k` | 回答用的块数 | 重排后取前 k 块拼进提示词。不是越大越好——无关块会稀释答案 |
 | `reranker_model` | 重排模型 | cross-encoder，把问题和候选块拼起来精读打分。检索质量的关键保险丝 |
 
-## 八、配置在代码中的流转
+## 八、llm —— 引擎选择
+
+| 字段 | 作用 | 说明 |
+|---|---|---|
+| `engine` | LLM 调用引擎 | `langchain`（默认，ChatOpenAI + LCEL，含 ModelScope 思维链透传补丁）或 `native`（手写 OpenAI SDK，作为参照实现永久保留）。切换后 chat 行为一致 |
+
+## 九、配置在代码中的流转
 
 ```
 load_config() 读取

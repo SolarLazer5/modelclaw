@@ -1,4 +1,7 @@
 {
+    "llm": {
+        "engine": "langchain"
+    },
     "api": {
         "base_url": "https://api-inference.modelscope.cn/v1",
         "api_key": "",
@@ -33,6 +36,7 @@
         "keep_recent_turns": 4
     },
     "agent": {
+        "engine": "langgraph",
         "max_iterations": 8,
         "enabled_tools": [
             "calculator",

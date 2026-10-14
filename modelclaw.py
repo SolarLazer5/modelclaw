@@ -371,6 +371,22 @@ def agent(
     """Agent 模式：模型自主决策调用工具（计算器/文件/搜索/时间）完成任务"""
     cfg = apply_overrides(load_config(CONFIG_PATH), model, temperature)
     setup_logging(cfg)
+    engine = cfg.get("agent", {}).get("engine", "native")
+
+    if engine == "langgraph":
+        from agent_langgraph import new_thread_id, run_agent_langgraph
+        thread_id = resume or session or new_thread_id()
+        if task:
+            try:
+                run_agent_langgraph(cfg, thread_id, task)
+            except Exception as exc:
+                logger.error("Agent (langgraph) failed: %s", exc)
+                err_console.print(f"\n[red]× Agent 执行失败: {exc}[/red]")
+                raise typer.Exit(1)
+            return
+        _agent_repl_langgraph(cfg, thread_id)
+        return
+
     client = create_client(cfg)
     store = create_session_store(cfg)
 
@@ -393,6 +409,44 @@ def agent(
         return
 
     _agent_repl(client, cfg, store, session_id, system)
+
+
+def _agent_repl_langgraph(cfg: dict, thread_id: str) -> None:
+    """LangGraph 引擎的 REPL：记忆由 checkpointer 托管（thread_id 即会话）。"""
+    from agent_langgraph import run_agent_langgraph
+    console.print(Panel.fit(
+        f"Agent 模式（LangGraph 引擎） · 模型: [bold]{cfg['api']['model']}[/bold] · 线程: [bold]{thread_id}[/bold]\n"
+        "[dim]记忆由 LangGraph PostgresSaver 托管 · /tools 查看工具 · /exit 退出[/dim]",
+        border_style="yellow",
+    ))
+    while True:
+        try:
+            user_input = console.input("[bold yellow]agent>[/bold yellow] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]bye.[/dim]")
+            return
+        if not user_input:
+            continue
+        if user_input in ("/exit", "/quit"):
+            console.print("[dim]bye.[/dim]")
+            return
+        if user_input == "/tools":
+            enabled = cfg.get("agent", {}).get("enabled_tools", [])
+            table = Table(title="当前启用的工具", header_style="bold yellow")
+            table.add_column("工具", style="bold")
+            table.add_column("用途（模型读到的 description）")
+            for name in enabled:
+                if name in TOOLS:
+                    table.add_row(name, TOOLS[name]["schema"]["function"]["description"])
+            console.print(table)
+            continue
+        try:
+            run_agent_langgraph(cfg, thread_id, user_input)
+        except Exception as exc:
+            logger.error("Agent (langgraph) failed: %s", exc)
+            err_console.print(f"[red]× Agent 执行失败: {exc}[/red]")
+            continue
+        print()
 
 
 def _agent_repl(client, cfg: dict, store: SessionStore, session_id: str, system: Optional[str]) -> None:
@@ -458,6 +512,44 @@ def _agent_repl(client, cfg: dict, store: SessionStore, session_id: str, system:
             continue
         last = (user_input, result)
         print()
+
+
+@app.command()
+def serve(
+    host: Annotated[str, typer.Option("--host", help="监听地址")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-p", help="监听端口")] = 8000,
+) -> None:
+    """启动 HTTP 服务（/chat /chat/stream /ask /agent），CLI 的能力以 API 形式暴露"""
+    from server import run
+    console.print(f"[green]modelclaw API 服务启动: http://{host}:{port}[/green]（文档: /docs）")
+    run(host=host, port=port)
+
+
+@app.command(name="eval")
+def evaluate(
+    n: Annotated[int, typer.Option("--n", "-n", help="生成的测试问答对数量")] = 5,
+    save: Annotated[bool, typer.Option("--save", help="评估报告保存到 output/")] = False,
+) -> None:
+    """评估 RAG 问答质量：自动出题 → 批量预测 → LLM 判分 → 准确率报告"""
+    from evaluator import run_eval, save_report
+    cfg = load_config(CONFIG_PATH)
+    setup_logging(cfg)
+    with console.status(f"正在评估（生成 {n} 个问答对 → 预测 → 判分）..."):
+        report = run_eval(cfg, n)
+
+    table = Table(title=f"评估报告 · 准确率 {report['accuracy']:.0%}（{report['correct']}/{report['total']}）",
+                  header_style="bold green")
+    table.add_column("问题")
+    table.add_column("判定", justify="center")
+    table.add_column("理由")
+    for c in report["cases"]:
+        mark = "[green]√ CORRECT[/green]" if c["grade"] == "CORRECT" else "[red]× INCORRECT[/red]"
+        table.add_row(escape(c["query"])[:40], mark, escape(c["reason"])[:50])
+    console.print(table)
+
+    if save:
+        path = save_report(cfg, report)
+        console.print(f"[dim]报告已保存: {path}[/dim]")
 
 
 @app.command()

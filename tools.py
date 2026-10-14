@@ -210,6 +210,28 @@ def get_tool_schemas(enabled_tools: list[str]) -> list[dict]:
     return [TOOLS[name]["schema"] for name in enabled_tools if name in TOOLS]
 
 
+def get_lc_tools(enabled_tools: list[str]) -> list:
+    """The same tools as LangChain StructuredTools (for the LangGraph engine).
+
+    Dual registration: the native engine uses the JSON-schema dicts, LangGraph
+    uses these objects. handle_tool_error=True keeps the never-raise contract —
+    tool errors go back to the model as text.
+    """
+    from langchain_core.tools import StructuredTool
+    lc_tools = []
+    for name in enabled_tools:
+        if name not in TOOLS:
+            continue
+        meta = TOOLS[name]["schema"]["function"]
+        lc_tools.append(StructuredTool.from_function(
+            func=TOOLS[name]["func"],
+            name=name,
+            description=meta["description"],
+            handle_tool_error=True,
+        ))
+    return lc_tools
+
+
 def run_tool(name: str, arguments_json: str) -> str:
     """Execute one tool call. Never raises — errors go back to the model as text."""
     #raise BaseException

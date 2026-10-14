@@ -52,7 +52,15 @@ def ask(client: OpenAI, cfg: dict, messages: list) -> dict:
 
     Prints reasoning and answer chunks as they arrive, and returns the
     collected texts as {"reasoning": str, "answer": str}.
+
+    Engine dispatch: llm.engine = "langchain" delegates to llm_langchain.ask
+    (ChatOpenAI + LCEL); anything else uses the native engine below. The
+    native engine stays as the reference implementation.
     """
+    if cfg.get("llm", {}).get("engine") == "langchain":
+        from llm_langchain import ask as ask_langchain
+        return ask_langchain(cfg, messages)
+
     api_cfg = cfg["api"]
     retry_cfg = cfg.get("retry", {})
 

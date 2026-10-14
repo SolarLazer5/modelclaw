@@ -7,7 +7,10 @@
 - **流式对话输出**：实时打印模型回复，思考过程（`reasoning_content`，`=== Thinking ===`）与最终答案（`=== Final Answer ===`）分开展示
 - **会话记忆**：多轮对话自动持久化（SQLite / PostgreSQL 双后端），退出不丢；`chat --resume` 恢复历史会话
 - **上下文工程**：每次请求前自动执行「滚动摘要压缩 → token 裁剪」流水线
-- **Agent 工具调用**：`agent` 命令下模型自主调用工具（计算器 / 本地文件 / 联网搜索 / 当前时间），手写 tool_calls 循环，调用过程全程可视；带 eval 白名单、路径沙箱、迭代上限三层安全边界
+- **Agent 工具调用**：`agent` 命令下模型自主调用工具（计算器 / 本地文件 / 联网搜索 / 当前时间），调用过程全程可视；带 eval 白名单、路径沙箱、迭代上限三层安全边界
+- **双引擎架构**：LLM 调用可切 `llm.engine: native`（手写 OpenAI SDK 流式）/ `langchain`（ChatOpenAI + LCEL，含 ModelScope reasoning_content 透传补丁）；Agent 可切 `agent.engine: native`（手写 tool_calls 循环）/ `langgraph`（create_react_agent + PostgresSaver 检查点持久化）
+- **评估体系**：`modelclaw eval` 自动出题 → 批量预测 → LLM-as-a-Judge 结构化判分 → 准确率报告，回归有 pytest 守卫
+- **HTTP 服务**：`modelclaw serve` 启动 FastAPI，提供 /chat（JSON）/chat/stream（SSE）/ask/agent 端点
 - **RAG 知识库问答**：`ingest` 灌文档（切分→嵌入→向量库），`ask` 检索增强回答并附引用来源；嵌入走 DashScope 云端 API（零本地算力），向量库默认 pgvector（可切 sqlite-vec），检索用「向量+BM25 混合召回 + cross-encoder 重排」三级管线，相关度不足时零成本拒答
 - **可插拔存储层**：修改memory.backend配置切换 SQLite ↔ PostgreSQL
 - **异常重试**：基于 [tenacity](https://github.com/jd/tenacity) 的指数退避重试，覆盖超时、限流（429）、连接错误等可恢复异常
@@ -41,6 +44,9 @@ modelclaw ingest ./doc                          # 把文档灌入 RAG 知识库�
 modelclaw ask "retry 组有哪些字段？"             # RAG 问答：检索+重排后回答，附引用来源
 modelclaw docs                                    # 查看知识库来源；--delete 删来源，--clear 清空
 
+modelclaw eval --n 5 --save    # 评估 RAG 质量：自动出题→批量预测→LLM判分→准确率报告
+modelclaw serve --port 8000    # 启动 HTTP 服务（/chat /chat/stream /ask /agent）
+
 modelclaw config      # 查看当前生效配置（API 密钥打码显示）
 modelclaw models      # 列出当前 API 可用的模型
 modelclaw ping        # 连通性 + 认证测试，报告延迟
@@ -60,6 +66,8 @@ modelclaw clean -y    # 清理结果文件；--logs 连日志一起删；--sessi
 | `ingest` | 灌入文档到 RAG 知识库，`--force` 重灌已有来源 |
 | `ask` | RAG 知识库问答，`--k` 覆盖检索块数；相关度不足直接拒答 |
 | `docs` | 知识库来源列表；`--delete` 删来源、`--clear` 清空 |
+| `eval` | 评估 RAG 问答质量：`--n` 出题数，`--save` 报告落盘 |
+| `serve` | 启动 FastAPI 服务：`--host` / `--port` |
 | `sessions` | 列出历史会话；`--delete <片段>` 删除指定会话 |
 | `config` | 打印当前生效配置，密钥打码 |
 | `models` | 调用 API 列出可用模型 ID |
@@ -103,6 +111,11 @@ modelclaw chat
 | `rag_store.py` | `RagStore` 抽象基类 + `SqliteVecStore`（sqlite-vec 默认后端）+ 工厂；维度记入 rag_meta，不匹配时友好报错 | `rag` |
 | `pgvector_store.py` | pgvector 后端：`rag_chunks` 单表（embedding vector(N) 列），`<=>` 余弦距离 KNN；连接复用 memory.postgres | `rag` + `memory` |
 | `rag.py` | RAG 管线：ingest（切分/嵌入/入库）、混合检索（向量+BM25+RRF）、rerank、stuff 式问答 + 引用 | `rag` |
+| `llm_langchain.py` | LangChain 引擎：`ModelScopeChatOpenAI`（reasoning_content 透传补丁）+ LCEL 流式，`llm.engine` 切换 | `llm` + `api` + `retry` |
+| `agent_langgraph.py` | LangGraph 引擎：create_react_agent + PostgresSaver（thread_id 即会话） | `agent` |
+| `evaluator.py` | 评估管线：LCEL 出题链 / batch 预测 / function_calling 结构化判分 | `rag` + `api` |
+| `server.py` | FastAPI 服务：/chat（JSON）/chat/stream（SSE）/ask/agent | 全部 |
+| `tests/` | pytest 套件：双后端契约测试 + 工具安全 + 上下文工程 + LLM 回归守卫 | — |
 | `storage.py` | 结果落盘：按 `{前缀}_YYYYMMDD_HHMMSS.{格式}` 命名，JSON 格式可附元信息 | `storage` |
 | `logger.py` | `setup_logging()`：按配置初始化 root logger，同时写文件（UTF-8）和控制台 | `logging` |
 | `main.py` | 最简单的入口示例：一次完整调用流程，供学习对照 | 全部 |
@@ -238,6 +251,11 @@ modelclaw/
 ├── embeddings.py          # 嵌入（Qwen3-Embedding / bge）+ 重排（bge-reranker-base），供应商可插拔
 ├── rag_store.py           # RagStore 抽象基类 + sqlite-vec 后端 + 工厂
 ├── pgvector_store.py      # pgvector 后端：vector(N) 列 + <=> 余弦 KNN
+├── llm_langchain.py       # LangChain 引擎（含 ModelScope 思维链透传补丁）
+├── agent_langgraph.py     # LangGraph 引擎（create_react_agent + PostgresSaver）
+├── evaluator.py           # 评估管线：出题链 / 批量预测 / LLM 判分
+├── server.py              # FastAPI 服务层
+├── tests/                 # pytest 测试套件
 ├── rag.py                 # RAG 管线：ingest / 混合检索（向量+BM25+RRF）/ rerank / 问答
 ├── api_client.py          # API 请求（流式 ask / 非流式 complete / 带工具 ask_with_tools）+ 共用重试工厂
 ├── storage.py             # 结果存文件
@@ -250,7 +268,10 @@ modelclaw/
 │   ├── config字段说明.md   # 配置字段详细文档
 │   ├── M1学习计划.md       # M1 阶段学习笔记与验收清单
 │   ├── M2学习计划.md       # M2 阶段（Agent）学习笔记与验收清单
-│   └── M3学习计划.md       # M3 阶段（RAG）学习笔记与验收清单
+│   ├── M3学习计划.md       # M3 阶段（RAG）学习笔记与验收清单
+│   ├── M4学习计划.md       # M4 阶段（框架+质量+服务化）学习笔记与验收清单
+│   ├── M4收官目标存档.md   # M4 目标契约（先于实现存在的验收基线）
+│   └── 架构图.md           # 架构多视图：上下文/模块依赖/ERD/序列图/可插拔结构/演进路线
 └── output/                # 运行产物：结果文件 + app.log + sessions.db（gitignore）
 ```
 
@@ -263,6 +284,10 @@ modelclaw/
 - `langchain-core` + `tiktoken` — 上下文裁剪（trim_messages）与 token 计数
 - `psycopg` — PostgreSQL 存储后端（可选）
 - `ddgs` — DuckDuckGo 联网搜索（Agent 的 web_search 工具，免 API key）
-- `sentence-transformers` + `modelscope` — 嵌入与重排模型（Qwen3-Embedding / bge-reranker）
+- DashScope API — 云端嵌入（requests 直调，密钥走 .env 的 DASHSCOPE_API_KEY）
+- `sentence-transformers` — 本地重排模型（bge-reranker-base）
+- `langchain` / `langchain-openai` / `langgraph` — 框架引擎（LCEL / ChatOpenAI / create_react_agent + PostgresSaver）
+- `fastapi` + `uvicorn` — HTTP 服务化
+- `pytest` — 测试套件
 - `sqlite-vec` + `rank_bm25` — 本地向量库与关键词检索（混合召回）；pgvector 走 PG 扩展
 - `python-dotenv` — `.env` 环境变量注入
